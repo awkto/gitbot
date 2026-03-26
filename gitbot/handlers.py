@@ -15,6 +15,14 @@ from gitbot.prompts import (
 log = logging.getLogger(__name__)
 
 
+_GITBOT_LABELS = ["gitbot::thinking", "gitbot::working", "gitbot::waiting"]
+
+
+def _clear_status_label(project_id: int, issue_iid: int) -> None:
+    """Remove all gitbot scoped labels (work is done)."""
+    glc.remove_issue_labels(project_id, issue_iid, _GITBOT_LABELS)
+
+
 def _parse_json_response(raw: str) -> dict:
     """Extract JSON from LLM response, handling markdown fences."""
     cleaned = raw.strip()
@@ -127,11 +135,8 @@ async def handle_issue_assigned(payload: dict) -> None:
     reasoning = decision.get("reasoning", "")
     log.info("Triage for issue #%s: action=%s reason=%s", issue_iid, action, reasoning)
 
-    # Remove thinking label
-    glc.remove_issue_labels(project_id, issue_iid, ["gitbot::thinking"])
-
     if action == "implement":
-        # Update placeholder to show we're now building
+        # Update placeholder to show we're now building (replaces gitbot::thinking)
         glc.update_note_on_issue(
             project_id, issue_iid, placeholder_id,
             ":hammer_and_wrench: **Working on this** — I'll create a branch and open an MR shortly."
@@ -143,12 +148,11 @@ async def handle_issue_assigned(payload: dict) -> None:
             extra_notes=decision.get("implementation_notes", ""),
             placeholder_note_id=placeholder_id,
         )
-        glc.remove_issue_labels(project_id, issue_iid, ["gitbot::working"])
 
     elif action == "ask":
         question = decision.get("question", "Could you provide more details?")
         mention = decision.get("mention", f"@{assigner}")
-        # Replace placeholder with the question
+        # Replace placeholder with the question (replaces gitbot::thinking)
         glc.update_note_on_issue(
             project_id, issue_iid, placeholder_id,
             f"{mention} {question}"
@@ -169,6 +173,7 @@ async def handle_issue_assigned(payload: dict) -> None:
     else:  # discuss
         await _do_discuss(project_id, issue_iid, title, description,
                           placeholder_note_id=placeholder_id)
+        _clear_status_label(project_id, issue_iid)
 
 
 async def _do_implement(
@@ -212,7 +217,7 @@ async def _do_implement(
             f":x: I tried to implement this but had trouble structuring the output. "
             f"Here's what I came up with — I can retry if needed:\n\n{raw[:3000]}"
         )
-        glc.remove_issue_labels(project_id, issue_iid, ["gitbot::working"])
+        _clear_status_label(project_id, issue_iid)
         state.fail_work_item(work_id)
         return
 
@@ -239,7 +244,7 @@ async def _do_implement(
             f"[view the merge request]({mr['web_url']})\n\n"
             f"**Files created/modified:** {file_list}"
         )
-        glc.remove_issue_labels(project_id, issue_iid, ["gitbot::working"])
+        _clear_status_label(project_id, issue_iid)
         state.complete_work_item(work_id)
 
     except Exception as e:
@@ -249,7 +254,7 @@ async def _do_implement(
             f":x: I hit an error while creating the branch/MR: `{e}`\n\n"
             f"Branch: `{branch}`, files: {len(files)}"
         )
-        glc.remove_issue_labels(project_id, issue_iid, ["gitbot::working"])
+        _clear_status_label(project_id, issue_iid)
         state.fail_work_item(work_id)
 
 
@@ -404,7 +409,7 @@ async def _handle_followup(
 
     if action == "implement":
         if noteable_type == "Issue":
-            glc.remove_issue_labels(project_id, noteable_iid, ["gitbot::waiting"])
+            glc.set_issue_labels(project_id, noteable_iid, ["gitbot::working"])
         ctx = pending["context"]
         repo_tree, default_branch = _get_repo_tree_str(project_id)
         state.complete_work_item(pending["id"])
