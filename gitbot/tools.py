@@ -8,6 +8,7 @@ Tools are provider-agnostic — litellm normalizes tool_use across
 Anthropic, OpenAI, and Ollama.
 """
 
+import json
 import logging
 from gitbot import gitlab_client as glc
 from gitbot.config import settings
@@ -684,6 +685,26 @@ for _tool in TOOL_SCHEMAS:
 
 def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
     """Execute a tool call and return the result as a string for the LLM."""
+    # Fix args that some models (Gemini) return as strings instead of proper types
+    for key, val in list(args.items()):
+        if isinstance(val, str):
+            if val.startswith("[") or val.startswith("{"):
+                # Try JSON first (most reliable)
+                try:
+                    args[key] = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    # Gemini sometimes uses Python-style dicts with single quotes
+                    # Convert to valid JSON: single quotes → double quotes
+                    try:
+                        fixed = val.replace("'", '"')
+                        args[key] = json.loads(fixed)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+            elif val.lower() in ("true", "false"):
+                args[key] = val.lower() == "true"
+            elif val.isdigit():
+                args[key] = int(val)
+
     # Allow tools to specify a different project
     effective_pid = args.pop("project_id", None) or project_id
     log.info("Executing tool: %s (project=%s) %s", tool_name, effective_pid,
