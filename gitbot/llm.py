@@ -15,7 +15,7 @@ from gitbot.models import Family, Task, resolve_model
 litellm.suppress_debug_info = True
 log = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 15
+MAX_TOOL_ROUNDS = 75
 
 
 async def _claude_code_complete(system: str, prompt: str) -> str:

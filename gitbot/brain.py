@@ -72,9 +72,22 @@ Current context:
 
 Plan from triage: {plan}
 
-Use the tools to accomplish your task. Call them one at a time — you'll see
-each result before deciding the next step. When you're done, send a final
-text message summarizing what you did."""
+## How to work
+
+1. **For large tasks**: Start by posting a progress checklist comment using
+   post_comment with markdown checkboxes (- [ ] item). Update it periodically
+   by posting new comments as you complete sections. This helps the user track
+   progress and helps you resume if interrupted.
+
+2. **Parallel tool calls**: When multiple operations are independent (e.g.
+   creating 10 issues that don't depend on each other), call multiple tools
+   in a single response. Only serialize when there are dependencies (e.g.
+   create milestone first, then assign it to issues).
+
+3. **When done**: Send a final text message summarizing what you did.
+
+4. **If something fails**: Note the failure, adapt, and continue with
+   what you can do. Report failures in your summary."""
 
 
 async def decide_and_act(sit: Situation) -> None:
@@ -183,12 +196,17 @@ async def _execute_with_tools(sit: Situation, plan: str, placeholder_id: int | N
         if tool_name == "post_comment":
             body = args.get("body", "")
             comments_posted.append(body)
-            # Post as a real GitLab comment
             if sit.target_type == "Issue":
-                glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
+                note_id = glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
             elif sit.target_type == "MergeRequest":
-                glc.post_note_on_mr(sit.project_id, sit.target_iid, body)
-            return "Comment posted successfully."
+                note_id = glc.post_note_on_mr(sit.project_id, sit.target_iid, body)
+            else:
+                note_id = 0
+            return f"Comment posted (note_id={note_id}). You can update it later with update_comment."
+        if tool_name == "update_comment":
+            # Fill in target info from context
+            args.setdefault("target_type", "issue" if sit.target_type == "Issue" else "merge_request")
+            args.setdefault("target_iid", sit.target_iid)
         return executor(tool_name, args)
 
     actions = await llm.tool_loop(

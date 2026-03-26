@@ -35,6 +35,24 @@ TOOL_SCHEMAS = [
         },
     },
 
+    {
+        "type": "function",
+        "function": {
+            "name": "update_comment",
+            "description": "Edit an existing comment by note ID. Useful for updating progress checklists.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "integer", "description": "The ID of the note to edit"},
+                    "target_type": {"type": "string", "enum": ["issue", "merge_request"]},
+                    "target_iid": {"type": "integer"},
+                    "body": {"type": "string", "description": "New comment body (replaces entire content)"},
+                },
+                "required": ["note_id", "target_type", "target_iid", "body"],
+            },
+        },
+    },
+
     # --- Issues ---
     {
         "type": "function",
@@ -617,6 +635,13 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
         if tool_name == "post_comment":
             # Caller handles this — return instruction
             return f"Comment posted: {args['body'][:100]}..."
+
+        elif tool_name == "update_comment":
+            if args["target_type"] == "issue":
+                glc.update_note_on_issue(project_id, args["target_iid"], args["note_id"], args["body"])
+            else:
+                glc.update_note_on_mr(project_id, args["target_iid"], args["note_id"], args["body"])
+            return f"Updated comment {args['note_id']}"
 
         elif tool_name == "create_issue":
             data = {"title": args["title"]}
