@@ -161,6 +161,38 @@ def create_merge_request(
     return {"iid": mr.iid, "web_url": mr.web_url}
 
 
+def assign_mr(project_id: int, mr_iid: int, user_ids: list[int]) -> None:
+    """Assign users to an MR."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    mr = project.mergerequests.get(mr_iid)
+    mr.assignee_ids = user_ids
+    mr.save()
+
+
+def get_bot_user_id() -> int:
+    """Get the bot's own GitLab user ID."""
+    gl = get_client()
+    return gl.user.id
+
+
+def get_mr_details(project_id: int, mr_iid: int) -> dict:
+    """Get MR details including source branch, author, and assignees."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    mr = project.mergerequests.get(mr_iid)
+    return {
+        "iid": mr.iid,
+        "title": mr.title,
+        "source_branch": mr.source_branch,
+        "target_branch": mr.target_branch,
+        "author": mr.author.get("username") if isinstance(mr.author, dict) else "?",
+        "assignees": [a.get("username") for a in (mr.assignees or [])],
+        "state": mr.state,
+        "web_url": mr.web_url,
+    }
+
+
 def get_related_mrs(project_id: int, issue_iid: int) -> list[dict]:
     """Get MRs related to an issue (linked via 'Closes #N' or manual link)."""
     gl = get_client()

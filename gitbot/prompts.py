@@ -380,6 +380,72 @@ Respond with JSON:
     return system, user
 
 
+def mr_change_request(
+    family: Family, *, mr_title: str, request: str, current_diff: str, repo_tree: str, branch: str
+) -> tuple[str, str]:
+    system = """\
+You are GitBot, an AI developer. You authored a merge request and someone
+has requested changes. You must push new commits to the existing branch.
+
+You MUST respond with valid JSON only — no markdown, no extra text."""
+
+    if family in (Family.ANTHROPIC, Family.CLAUDE_CODE):
+        user = f"""\
+<task>Someone requested changes on your merge request. Push a new commit.</task>
+
+<merge_request>
+<title>{mr_title}</title>
+<branch>{branch}</branch>
+<current_diff>
+{current_diff}
+</current_diff>
+</merge_request>
+
+<request>{request}</request>
+
+<repository_files>
+{repo_tree}
+</repository_files>
+
+<instructions>
+Respond with a JSON object describing the commit to push to branch `{branch}`:
+{{
+  "commit_message": "Description of the changes",
+  "files": [
+    {{
+      "action": "create",
+      "file_path": "path/to/file",
+      "content": "full file content"
+    }}
+  ]
+}}
+
+Rules:
+- "action": "create" for new files, "update" for modifying existing files on the branch
+- For "update", include the COMPLETE new file content, not a partial patch
+- Only include files that need to change — don't re-commit unchanged files
+- Write production-quality code
+- JSON only, no other text
+</instructions>"""
+    else:
+        user = f"""\
+Someone requested changes on your MR "{mr_title}" (branch: {branch}).
+
+Request: {request}
+
+Current diff:
+```diff
+{current_diff}
+```
+
+Repo files: {repo_tree}
+
+Push a commit. JSON only:
+{{"commit_message": "...", "files": [{{"action": "create|update", "file_path": "...", "content": "..."}}]}}"""
+
+    return system, user
+
+
 def clarify(family: Family, *, context: str, what_is_unclear: str) -> tuple[str, str]:
     system = _system(family)
     user = f"""\

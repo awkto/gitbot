@@ -10,6 +10,7 @@ from gitbot.models import Task
 from gitbot.prompts import (
     triage, implement, issue_analysis, mr_summary,
     code_review, mention_response, followup_response,
+    mr_change_request as mr_change_request_prompt,
 )
 
 log = logging.getLogger(__name__)
@@ -237,6 +238,13 @@ async def _do_implement(
         )
         log.info("Created MR !%s: %s", mr["iid"], mr["web_url"])
 
+        # Assign the bot to its own MR so it shows up as the owner
+        try:
+            bot_uid = glc.get_bot_user_id()
+            glc.assign_mr(project_id, mr["iid"], [bot_uid])
+        except Exception:
+            log.warning("Could not self-assign MR !%s", mr["iid"])
+
         file_list = ", ".join("`" + f["file_path"] + "`" for f in files)
         glc.update_note_on_issue(
             project_id, issue_iid, placeholder_note_id,
@@ -299,8 +307,69 @@ async def _do_discuss(
 
 
 # ---------------------------------------------------------------------------
-# MR handlers (unchanged for now)
+# MR handlers
 # ---------------------------------------------------------------------------
+
+async def handle_mr_change_request(payload: dict) -> None:
+    """Someone commented on a bot-authored MR — push changes to the branch."""
+    project_id = payload["project"]["id"]
+    note_body = payload["object_attributes"]["note"]
+    mr_payload = payload.get("merge_request", {})
+    mr_iid = mr_payload["iid"]
+    mr_title = mr_payload.get("title", "")
+    source_branch = mr_payload.get("source_branch", "")
+    discussion_id = payload["object_attributes"].get("discussion_id")
+
+    placeholder_id = glc.post_note_on_mr(
+        project_id, mr_iid,
+        ":hourglass_flowing_sand: **Looking at this change request...**"
+    )
+
+    diff = glc.get_mr_diff(project_id, mr_iid)
+    repo_tree, _ = _get_repo_tree_str(project_id)
+
+    system, prompt = mr_change_request_prompt(
+        settings.llm_family,
+        mr_title=mr_title,
+        request=note_body,
+        current_diff=diff,
+        repo_tree=repo_tree,
+        branch=source_branch,
+    )
+
+    raw = await llm.complete(Task.IMPLEMENT, system=system, prompt=prompt)
+
+    try:
+        plan = _parse_json_response(raw)
+    except (json.JSONDecodeError, KeyError) as e:
+        log.error("Failed to parse MR change response: %s", e)
+        glc.update_note_on_mr(
+            project_id, mr_iid, placeholder_id,
+            f":x: I had trouble structuring the changes. Here's what I came up with:\n\n{raw[:3000]}"
+        )
+        return
+
+    files = plan["files"]
+    commit_msg = plan["commit_message"]
+
+    try:
+        glc.commit_files(project_id, source_branch, commit_msg, files)
+        log.info("Pushed %d file(s) to %s for MR !%s", len(files), source_branch, mr_iid)
+
+        file_list = ", ".join("`" + f["file_path"] + "`" for f in files)
+        glc.update_note_on_mr(
+            project_id, mr_iid, placeholder_id,
+            f":white_check_mark: Pushed a new commit to `{source_branch}`\n\n"
+            f"**{commit_msg}**\n\n"
+            f"Files changed: {file_list}"
+        )
+    except Exception as e:
+        log.exception("Failed to push changes to MR !%s", mr_iid)
+        glc.update_note_on_mr(
+            project_id, mr_iid, placeholder_id,
+            f":x: Failed to push changes: `{e}`"
+        )
+
 
 async def handle_mr_assigned(payload: dict) -> None:
     """Bot was assigned to an MR - look at the diff and comment."""

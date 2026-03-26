@@ -3,7 +3,7 @@
 import logging
 
 from gitbot.config import settings
-from gitbot import handlers, locks, state
+from gitbot import handlers, locks, state, gitlab_client as glc
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +88,14 @@ async def _dispatch(event_type: str, payload: dict, bot: str) -> None:
         bot_is_assignee = any(a.get("username") == bot for a in assignees)
         bot_is_reviewer = any(r.get("username") == bot for r in reviewers)
 
+        # Check if the bot authored this MR — skip self-assignment but still
+        # allow review requests (someone else asking the bot to review its own MR)
+        mr_author = attrs.get("author", {}).get("username") or payload.get("user", {}).get("username")
+        bot_is_author = (mr_author == bot)
+        if bot_is_author and bot_is_assignee and not bot_is_reviewer:
+            log.debug("Ignoring assignment on bot-authored MR !%s", attrs.get("iid"))
+            return
+
         if bot_is_reviewer:
             await handlers.handle_mr_review_requested(payload)
             return
@@ -111,5 +119,17 @@ async def _dispatch(event_type: str, payload: dict, bot: str) -> None:
         if f"@{bot}" in note_body:
             await handlers.handle_mention(payload)
             return
+
+        # Comments on MRs where bot is assigned — treat as change requests
+        if note_target and note_target[1] == "MergeRequest":
+            mr_iid = payload.get("merge_request", {}).get("iid", note_target[2])
+            try:
+                mr_details = glc.get_mr_details(note_target[0], mr_iid)
+                if bot in mr_details.get("assignees", []):
+                    log.info("Comment on bot-assigned MR !%s — treating as change request", mr_iid)
+                    await handlers.handle_mr_change_request(payload)
+                    return
+            except Exception:
+                pass
 
     log.debug("Ignoring event: %s (action=%s)", event_type, payload.get("object_attributes", {}).get("action"))
