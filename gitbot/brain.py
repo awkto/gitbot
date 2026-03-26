@@ -1,21 +1,22 @@
-"""The bot's brain — iteratively gathers context, then decides and acts.
+"""The bot's brain — iteratively gathers context, then acts via tool calling.
 
 Flow:
 1. Start with minimal context (from webhook payload, no API calls)
 2. Ask Haiku: "Do you have enough to act, or what do you need?"
 3. If it needs more → fetch what it asked for → ask again (up to MAX_ROUNDS)
-4. Once ready → execute the chosen action with a stronger model
+4. Once ready → hand off to the tool-calling loop with a stronger model
 """
 
 import json
 import logging
 import re
+from functools import partial
 
 from gitbot import llm, gitlab_client as glc, state
 from gitbot.config import settings
-from gitbot.context import Situation, fetch_source, MAX_ROUNDS, AVAILABLE_SOURCES
-from gitbot.models import Task, Tier
-from gitbot.prompts import implement, code_review, mr_change_request as mr_change_prompt
+from gitbot.context import Situation, fetch_source, MAX_ROUNDS
+from gitbot.models import Task
+from gitbot.tools import TOOL_SCHEMAS, execute_tool
 
 log = logging.getLogger(__name__)
 
@@ -34,38 +35,22 @@ GATHER_PROMPT = """\
 <instructions>
 Look at the available information. Decide ONE of:
 
-1. **"ready"** — You have enough context to decide what action to take.
-   Proceed to pick an action.
-
+1. **"ready"** — You have enough context to act. Describe what you plan to do.
 2. **"fetch"** — You need more context before deciding. Request specific sources.
-
 3. **"skip"** — This event doesn't require the bot's attention at all.
-   (e.g. a comment from someone else on an unrelated issue)
 
-If "ready", also pick your action and explain your reasoning.
+If "ready", describe what you'll do and provide any guidance.
 If "fetch", list exactly which sources you need and why.
 
-Important: Check the conversation history if available. If you or another bot
-just handled a request on this same target, don't duplicate work that was
-already completed.
-
-Available actions (for when ready):
-- "create_mr" — Create a new branch, write code, open a merge request
-- "push_commits" — Push new commits to an existing MR branch
-- "review" — Do a code review of a merge request
-- "comment" — Post a comment with analysis or a response
-- "ask" — Ask a clarifying question before proceeding
-- "nothing" — No action needed
+Important: Check the conversation history if available. Don't duplicate work
+that was already completed.
 
 Respond with JSON:
 {{
   "status": "ready" | "fetch" | "skip",
   "fetch_sources": ["source1", "source2"],
-  "action": "create_mr" | "push_commits" | "review" | "comment" | "ask" | "nothing",
-  "reasoning": "Your thinking process",
-  "content": "Comment/question text (for comment, ask actions)",
-  "mention": "@username (for ask action)",
-  "implementation_notes": "What to build (for create_mr, push_commits)"
+  "plan": "What you intend to do (when ready)",
+  "reasoning": "Your thinking process"
 }}
 
 Only include fields relevant to your status.
@@ -73,16 +58,59 @@ Round {round} of {max_rounds}.{already_fetched}
 </instructions>"""
 
 
+AGENT_SYSTEM = """\
+You are GitBot, an AI software developer embedded in a GitLab team.
+
+You work entirely through GitLab using the tools provided. You can create
+branches, write code, open merge requests, create issues, manage milestones,
+search for issues, post comments, and more.
+
+You are working in project "{project_name}" (ID: {project_id}).
+
+Current context:
+{situation}
+
+Plan from triage: {plan}
+
+Use the tools to accomplish your task. Call them one at a time — you'll see
+each result before deciding the next step. When you're done, send a final
+text message summarizing what you did."""
+
+
 async def decide_and_act(sit: Situation) -> None:
-    """Main entry: iteratively gather context, then act."""
+    """Main entry: gather context iteratively, then act via tools."""
     if _should_skip(sit):
         return
 
-    # Post placeholder immediately
     placeholder_id = _post_placeholder(sit)
 
-    # Iterative context gathering loop
-    decision = None
+    # Phase 1: Iterative context gathering (Haiku — cheap)
+    plan = await _gather_context(sit)
+
+    if plan is None:
+        # skip
+        _remove_placeholder(sit, placeholder_id)
+        return
+
+    # Phase 2: Execute with tools (Sonnet/Opus — capable)
+    _update_placeholder(sit, placeholder_id,
+                        ":hammer_and_wrench: **Working on it...**")
+    if sit.target_type == "Issue":
+        glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
+
+    result = await _execute_with_tools(sit, plan, placeholder_id)
+
+    # Phase 3: Update placeholder with result
+    _update_placeholder(sit, placeholder_id, result)
+    _clear_labels(sit)
+
+    # Clean up pending question if we acted
+    if sit.pending_question:
+        state.complete_work_item(sit.pending_question["id"])
+
+
+async def _gather_context(sit: Situation) -> str | None:
+    """Iterative context loop. Returns the plan string, or None to skip."""
     for round_num in range(1, MAX_ROUNDS + 1):
         already = ""
         if sit.fetched_sources:
@@ -95,22 +123,20 @@ async def decide_and_act(sit: Situation) -> None:
             already_fetched=already,
         )
 
-        # Use cheap model for context gathering
         raw = await llm.complete(Task.TRIAGE, system=GATHER_SYSTEM, prompt=prompt)
 
         try:
             result = _parse_json(raw)
         except (json.JSONDecodeError, KeyError):
-            log.warning("Failed to parse gather response (round %d): %s", round_num, raw[:200])
-            result = {"status": "ready", "action": "comment", "content": raw}
+            log.warning("Failed to parse gather response (round %d)", round_num)
+            return "Respond to the event appropriately."
 
         status = result.get("status", "ready")
-        log.info("Round %d/%d: status=%s", round_num, MAX_ROUNDS, status)
+        log.info("Gather round %d/%d: status=%s", round_num, MAX_ROUNDS, status)
 
         if status == "skip":
             log.info("Brain says skip for %s #%s", sit.target_type, sit.target_iid)
-            _remove_placeholder(sit, placeholder_id)
-            return
+            return None
 
         if status == "fetch":
             sources = result.get("fetch_sources", [])
@@ -119,40 +145,110 @@ async def decide_and_act(sit: Situation) -> None:
                 fetch_source(sit, source)
             continue
 
-        # status == "ready"
-        decision = result
-        break
+        # ready
+        plan = result.get("plan", result.get("reasoning", "Handle this event."))
+        log.info("Plan for %s #%s: %s", sit.target_type, sit.target_iid, plan[:120])
+        return plan
 
-    if not decision:
-        log.warning("Exhausted %d rounds without deciding, forcing action", MAX_ROUNDS)
-        decision = {"action": "comment", "content": "I'm having trouble figuring out what to do here. Could you give me more specific instructions?"}
+    log.warning("Exhausted %d gather rounds", MAX_ROUNDS)
+    return "Do your best to handle this event."
 
-    action = decision.get("action", "nothing")
-    reasoning = decision.get("reasoning", "")
-    log.info("Decision for %s #%s: action=%s reason=%s",
-             sit.target_type, sit.target_iid, action, reasoning[:120])
 
-    # Execute
-    if action == "create_mr":
-        await _do_create_mr(sit, decision, placeholder_id)
-    elif action == "push_commits":
-        await _do_push_commits(sit, decision, placeholder_id)
-    elif action == "review":
-        await _do_review(sit, decision, placeholder_id)
-    elif action == "comment":
-        _do_comment(sit, decision, placeholder_id)
-    elif action == "ask":
-        _do_ask(sit, decision, placeholder_id)
+async def _execute_with_tools(sit: Situation, plan: str, placeholder_id: int | None) -> str:
+    """Run the tool-calling agentic loop."""
+    system = AGENT_SYSTEM.format(
+        project_name=sit.project_name,
+        project_id=sit.project_id,
+        situation=sit.to_prompt(),
+        plan=plan,
+    )
+
+    # Build the initial prompt based on what triggered this
+    if sit.comment_body:
+        prompt = f"Respond to this request:\n\n{sit.comment_body}"
+    elif sit.trigger == "review_requested":
+        prompt = f"Review merge request !{sit.target_iid}: {sit.target_title}"
+    elif sit.trigger == "assigned":
+        prompt = f"You've been assigned to {sit.target_type} #{sit.target_iid}: {sit.target_title}\n\n{sit.target_description}"
     else:
-        _remove_placeholder(sit, placeholder_id)
+        prompt = f"Handle this event on {sit.target_type} #{sit.target_iid}: {sit.target_title}"
 
-    # Clean up pending question if we acted
-    if sit.pending_question and action != "nothing":
-        state.complete_work_item(sit.pending_question["id"])
+    # Create the tool executor bound to this project
+    executor = partial(execute_tool, project_id=sit.project_id)
 
+    # Wrap executor to intercept post_comment and handle it specially
+    comments_posted = []
+
+    def wrapped_executor(tool_name, args):
+        if tool_name == "post_comment":
+            body = args.get("body", "")
+            comments_posted.append(body)
+            # Post as a real GitLab comment
+            if sit.target_type == "Issue":
+                glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
+            elif sit.target_type == "MergeRequest":
+                glc.post_note_on_mr(sit.project_id, sit.target_iid, body)
+            return "Comment posted successfully."
+        return executor(tool_name, args)
+
+    actions = await llm.tool_loop(
+        Task.IMPLEMENT,
+        system=system,
+        prompt=prompt,
+        tools=TOOL_SCHEMAS,
+        execute_fn=wrapped_executor,
+    )
+
+    # Build summary from actions
+    return _summarize_actions(actions, comments_posted)
+
+
+def _summarize_actions(actions: list[dict], comments_posted: list[str]) -> str:
+    """Build a summary of what the bot did."""
+    if not actions:
+        return "*(no actions taken)*"
+
+    # If the last action is a text response, use that as the summary
+    if actions[-1]["tool"] == "_text_response":
+        summary = actions[-1]["result"]
+        # If no other actions besides text and comments, just use the text
+        real_actions = [a for a in actions if a["tool"] not in ("_text_response", "post_comment")]
+        if not real_actions:
+            return summary
+
+    # Build a structured summary
+    parts = []
+    for a in actions:
+        if a["tool"] == "_text_response":
+            continue
+        if a["tool"] == "post_comment":
+            continue  # already posted as real comments
+        result = a["result"]
+        if len(result) > 200:
+            result = result[:200] + "..."
+        parts.append(f"- **{a['tool']}**: {result}")
+
+    if not parts:
+        # Only had text/comments
+        if actions[-1]["tool"] == "_text_response":
+            return actions[-1]["result"]
+        return "*(completed)*"
+
+    summary_text = "\n".join(parts)
+
+    # Include the model's final text if present
+    final = next((a["result"] for a in reversed(actions) if a["tool"] == "_text_response"), None)
+    if final:
+        return f"{final}\n\n**Actions taken:**\n{summary_text}"
+
+    return f"**Actions taken:**\n{summary_text}"
+
+
+# ---------------------------------------------------------------------------
+# Pre-filters and helpers
+# ---------------------------------------------------------------------------
 
 def _should_skip(sit: Situation) -> bool:
-    """Quick pre-LLM filters."""
     if sit.actor == sit.bot_username:
         log.info("Ignoring self-triggered event")
         return True
@@ -162,9 +258,6 @@ def _should_skip(sit: Situation) -> bool:
         has_pending = sit.pending_question is not None
         is_asked_user = has_pending and sit.actor == sit.pending_question.get("asked_user")
 
-        # We might not know bot's role from webhook alone (Note Hooks don't
-        # always include assignee info). If we have no mention, no pending
-        # question from this user, do a quick API check for MR assignment.
         has_role = sit.bot_is_assignee or sit.bot_is_reviewer or sit.bot_is_author
         if not has_role and sit.target_type == "MergeRequest" and sit.target_iid:
             try:
@@ -183,12 +276,14 @@ def _should_skip(sit: Situation) -> bool:
             log.debug("Ignoring note — pending question but from different user")
             return True
 
+    # Skip MR events the bot authored (unless review requested)
+    if sit.event_type == "Merge Request Hook" and sit.bot_is_author:
+        if not sit.bot_is_reviewer and sit.trigger != "review_requested":
+            log.debug("Ignoring MR event on bot-authored MR !%s", sit.target_iid)
+            return True
+
     return False
 
-
-# ---------------------------------------------------------------------------
-# Placeholders and labels
-# ---------------------------------------------------------------------------
 
 def _post_placeholder(sit: Situation) -> int | None:
     try:
@@ -245,189 +340,3 @@ def _parse_json(raw: str) -> dict:
         cleaned = re.sub(r"^```\w*\n?", "", cleaned)
         cleaned = re.sub(r"\n?```$", "", cleaned)
     return json.loads(cleaned)
-
-
-# ---------------------------------------------------------------------------
-# Action executors
-# ---------------------------------------------------------------------------
-
-async def _do_create_mr(sit: Situation, decision: dict, placeholder_id: int | None) -> None:
-    _update_placeholder(sit, placeholder_id,
-                        ":hammer_and_wrench: **Working on this** — creating a branch and writing code...")
-    if sit.target_type == "Issue":
-        glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
-
-    work_id = state.create_work_item(
-        sit.project_id, sit.target_type, sit.target_iid, "create_mr",
-    )
-
-    # Make sure we have repo_tree
-    if "repo_tree" not in sit.gathered:
-        fetch_source(sit, "repo_tree")
-
-    extra_notes = decision.get("implementation_notes", "")
-    description = sit.target_description
-    if extra_notes:
-        description += f"\n\nAdditional guidance: {extra_notes}"
-
-    # Figure out default branch
-    gl = glc.get_client()
-    project = gl.projects.get(sit.project_id)
-    default_branch = project.default_branch or "main"
-
-    system, prompt = implement(
-        settings.llm_family,
-        title=sit.target_title,
-        description=description,
-        repo_tree=sit.gathered.get("repo_tree", ""),
-        default_branch=default_branch,
-    )
-
-    raw = await llm.complete(Task.IMPLEMENT, system=system, prompt=prompt)
-
-    try:
-        plan = _parse_json(raw)
-    except (json.JSONDecodeError, KeyError) as e:
-        log.error("Failed to parse implementation: %s", e)
-        _update_placeholder(sit, placeholder_id,
-                            f":x: I had trouble structuring my implementation:\n\n{raw[:3000]}")
-        _clear_labels(sit)
-        state.fail_work_item(work_id)
-        return
-
-    branch = plan["branch_name"]
-    files = plan["files"]
-
-    try:
-        glc.create_branch(sit.project_id, branch, ref=default_branch)
-        glc.commit_files(sit.project_id, branch, plan["commit_message"], files)
-
-        mr_desc = plan["mr_description"]
-        if sit.target_type == "Issue":
-            mr_desc += f"\n\nCloses #{sit.target_iid}"
-        mr = glc.create_merge_request(
-            sit.project_id, branch, default_branch, plan["mr_title"], mr_desc
-        )
-        log.info("Created MR !%s: %s", mr["iid"], mr["web_url"])
-
-        try:
-            glc.assign_mr(sit.project_id, mr["iid"], [glc.get_bot_user_id()])
-        except Exception:
-            pass
-
-        file_list = ", ".join("`" + f["file_path"] + "`" for f in files)
-        _update_placeholder(sit, placeholder_id,
-                            f":white_check_mark: Implemented and opened **!{mr['iid']}** — "
-                            f"[view merge request]({mr['web_url']})\n\n"
-                            f"**Files:** {file_list}")
-        _clear_labels(sit)
-        state.complete_work_item(work_id)
-
-    except Exception as e:
-        log.exception("Failed to create MR")
-        _update_placeholder(sit, placeholder_id, f":x: Failed to create branch/MR: `{e}`")
-        _clear_labels(sit)
-        state.fail_work_item(work_id)
-
-
-async def _do_push_commits(sit: Situation, decision: dict, placeholder_id: int | None) -> None:
-    branch = sit.mr_source_branch
-    if not branch:
-        # Try to get it
-        if "mr_details" not in sit.fetched_sources:
-            fetch_source(sit, "mr_details")
-        branch = sit.mr_source_branch
-
-    if not branch:
-        _update_placeholder(sit, placeholder_id,
-                            ":x: Can't push — no source branch found.")
-        return
-
-    _update_placeholder(sit, placeholder_id,
-                        f":hammer_and_wrench: **Pushing changes** to `{branch}`...")
-
-    # Ensure we have the diff
-    if "diff" not in sit.gathered:
-        fetch_source(sit, "diff")
-    if "repo_tree" not in sit.gathered:
-        fetch_source(sit, "repo_tree")
-
-    request = sit.comment_body or decision.get("implementation_notes", "")
-
-    system, prompt = mr_change_prompt(
-        settings.llm_family,
-        mr_title=sit.target_title,
-        request=request,
-        current_diff=sit.gathered.get("diff", ""),
-        repo_tree=sit.gathered.get("repo_tree", ""),
-        branch=branch,
-    )
-
-    raw = await llm.complete(Task.IMPLEMENT, system=system, prompt=prompt)
-
-    try:
-        plan = _parse_json(raw)
-    except (json.JSONDecodeError, KeyError):
-        _update_placeholder(sit, placeholder_id,
-                            f":x: Had trouble structuring changes:\n\n{raw[:3000]}")
-        return
-
-    try:
-        glc.commit_files(sit.project_id, branch, plan["commit_message"], plan["files"])
-        file_list = ", ".join("`" + f["file_path"] + "`" for f in plan["files"])
-        _update_placeholder(sit, placeholder_id,
-                            f":white_check_mark: Pushed to `{branch}`\n\n"
-                            f"**{plan['commit_message']}**\n\nFiles: {file_list}")
-        log.info("Pushed %d file(s) to %s", len(plan["files"]), branch)
-    except Exception as e:
-        log.exception("Failed to push to %s", branch)
-        _update_placeholder(sit, placeholder_id, f":x: Failed to push: `{e}`")
-
-
-async def _do_review(sit: Situation, decision: dict, placeholder_id: int | None) -> None:
-    _update_placeholder(sit, placeholder_id,
-                        ":mag: **Reviewing this merge request...**")
-
-    if "diff" not in sit.gathered:
-        fetch_source(sit, "diff")
-
-    system, prompt = code_review(
-        settings.llm_family,
-        title=sit.target_title,
-        description=sit.target_description,
-        diff=sit.gathered.get("diff", ""),
-    )
-
-    response = await llm.complete(Task.CODE_REVIEW, system=system, prompt=prompt)
-    _update_placeholder(sit, placeholder_id, response)
-    log.info("Reviewed MR !%s", sit.target_iid)
-
-
-def _do_comment(sit: Situation, decision: dict, placeholder_id: int | None) -> None:
-    content = decision.get("content", decision.get("reasoning", ""))
-    if not content:
-        _remove_placeholder(sit, placeholder_id)
-        return
-    _update_placeholder(sit, placeholder_id, content)
-    _clear_labels(sit)
-    log.info("Commented on %s #%s", sit.target_type, sit.target_iid)
-
-
-def _do_ask(sit: Situation, decision: dict, placeholder_id: int | None) -> None:
-    question = decision.get("content", decision.get("question", "Could you provide more details?"))
-    mention = decision.get("mention", f"@{sit.actor}")
-
-    _update_placeholder(sit, placeholder_id, f"{mention} {question}")
-
-    if sit.target_type == "Issue":
-        glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::waiting"])
-
-    work_id = state.create_work_item(
-        sit.project_id, sit.target_type, sit.target_iid, "asked_question",
-        context={"title": sit.target_title, "description": sit.target_description, "actor": sit.actor},
-    )
-    state.set_pending_response(work_id, question, mention.lstrip("@"), {
-        "title": sit.target_title, "description": sit.target_description, "actor": sit.actor,
-    })
-    log.info("Asked question on %s #%s, waiting for %s",
-             sit.target_type, sit.target_iid, mention)
