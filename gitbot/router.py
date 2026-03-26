@@ -3,7 +3,7 @@
 import logging
 
 from gitbot.config import settings
-from gitbot import handlers
+from gitbot import handlers, locks
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +22,30 @@ def _is_self_triggered(payload: dict) -> bool:
     return False
 
 
+def _extract_target(event_type: str, payload: dict) -> tuple[int, str, int] | None:
+    """Extract (project_id, target_type, target_iid) for locking."""
+    project_id = payload.get("project", {}).get("id")
+    if not project_id:
+        return None
+
+    if event_type == "Issue Hook":
+        iid = payload.get("object_attributes", {}).get("iid")
+        return (project_id, "Issue", iid) if iid else None
+
+    if event_type == "Merge Request Hook":
+        iid = payload.get("object_attributes", {}).get("iid")
+        return (project_id, "MergeRequest", iid) if iid else None
+
+    if event_type == "Note Hook":
+        noteable_type = payload.get("object_attributes", {}).get("noteable_type")
+        if noteable_type == "MergeRequest" and "merge_request" in payload:
+            return (project_id, "MergeRequest", payload["merge_request"]["iid"])
+        if noteable_type == "Issue" and "issue" in payload:
+            return (project_id, "Issue", payload["issue"]["iid"])
+
+    return None
+
+
 async def route_event(event_type: str, payload: dict) -> None:
     """Determine what happened and dispatch to the appropriate handler."""
     bot = settings.bot_username
@@ -30,6 +54,24 @@ async def route_event(event_type: str, payload: dict) -> None:
         log.info("Ignoring self-triggered event: %s", event_type)
         return
 
+    # Acquire per-target lock so concurrent events for the same issue/MR
+    # are serialized (e.g. assignment + mention arriving close together)
+    target = _extract_target(event_type, payload)
+    lock = None
+    if target:
+        lock = await locks.acquire(*target)
+        log.debug("Acquired lock for %s", target)
+
+    try:
+        await _dispatch(event_type, payload, bot)
+    finally:
+        if lock:
+            lock.release()
+            locks.cleanup()
+
+
+async def _dispatch(event_type: str, payload: dict, bot: str) -> None:
+    """Route to the correct handler."""
     if event_type == "Issue Hook":
         action = payload.get("object_attributes", {}).get("action")
         assignees = payload.get("assignees", [])

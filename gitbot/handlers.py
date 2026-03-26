@@ -67,6 +67,21 @@ async def _handle_issue_implement(
     project_id: int, issue_iid: int, title: str, description: str
 ) -> None:
     """Implement the issue: create branch, write files, open MR."""
+    # Check if an MR already exists for this issue
+    existing_mrs = glc.get_related_mrs(project_id, issue_iid)
+    open_mrs = [mr for mr in existing_mrs if mr["state"] == "opened"]
+    if open_mrs:
+        mr = open_mrs[0]
+        glc.post_note_on_issue(
+            project_id, issue_iid,
+            f"There's already an open MR for this issue: "
+            f"**!{mr['iid']}** [{mr['title']}]({mr['web_url']}) "
+            f"(branch `{mr['source_branch']}`). "
+            f"I'll review that instead of creating a new one."
+        )
+        log.info("Issue #%s already has open MR !%s, skipping implementation", issue_iid, mr["iid"])
+        return
+
     # Get repo tree for context
     try:
         tree = glc.list_repo_tree(project_id)

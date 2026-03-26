@@ -1,18 +1,31 @@
 """FastAPI webhook server."""
 
-import hashlib
-import hmac
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from gitbot.config import settings
 from gitbot.router import route_event
+from gitbot.todos import process_pending_todos
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="GitBot", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # On startup: process any pending todos from before crash/restart
+    log.info("Checking for pending todos (crash recovery)...")
+    try:
+        await process_pending_todos()
+    except Exception:
+        log.exception("Error processing pending todos on startup")
+    yield
+
+
+app = FastAPI(title="GitBot", version="0.1.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -33,9 +46,6 @@ async def webhook(
 
     payload = await request.json()
     log.info("Received event: %s", x_gitlab_event)
-
-    # Process async - don't block the webhook response
-    import asyncio
 
     async def _safe_route(event_type, payload):
         try:

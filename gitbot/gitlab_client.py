@@ -115,3 +115,64 @@ def create_merge_request(
         "description": description,
     })
     return {"iid": mr.iid, "web_url": mr.web_url}
+
+
+def get_related_mrs(project_id: int, issue_iid: int) -> list[dict]:
+    """Get MRs related to an issue (linked via 'Closes #N' or manual link)."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    issue = project.issues.get(issue_iid)
+    mrs = issue.related_merge_requests()
+    return [
+        {
+            "iid": mr["iid"],
+            "title": mr["title"],
+            "state": mr["state"],
+            "source_branch": mr["source_branch"],
+            "web_url": mr["web_url"],
+            "author": mr.get("author", {}).get("username", "?"),
+        }
+        for mr in mrs
+    ]
+
+
+def get_closing_mrs(project_id: int, issue_iid: int) -> list[dict]:
+    """Get MRs that will close this issue when merged."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    issue = project.issues.get(issue_iid)
+    mrs = issue.closed_by()
+    return [
+        {
+            "iid": mr["iid"],
+            "title": mr["title"],
+            "state": mr["state"],
+            "web_url": mr["web_url"],
+        }
+        for mr in mrs
+    ]
+
+
+def get_pending_todos() -> list[dict]:
+    """Get all pending todos for the bot user."""
+    gl = get_client()
+    todos = gl.todos.list(state="pending", get_all=True)
+    return [
+        {
+            "id": t.id,
+            "action": t.action_name,
+            "target_type": t.target_type,
+            "target_iid": t.target.get("iid") if isinstance(t.target, dict) else getattr(t.target, "iid", None),
+            "target_title": t.target.get("title") if isinstance(t.target, dict) else getattr(t.target, "title", None),
+            "project_id": t.project.get("id") if isinstance(t.project, dict) else getattr(t.project, "id", None),
+            "body": t.body,
+            "created_at": t.created_at,
+        }
+        for t in todos
+    ]
+
+
+def mark_todo_done(todo_id: int) -> None:
+    """Mark a todo as done."""
+    gl = get_client()
+    gl.http_post(f"/todos/{todo_id}/mark_as_done")
