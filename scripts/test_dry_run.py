@@ -1,112 +1,137 @@
 #!/usr/bin/env python3
-"""End-to-end dry run: routes webhook payloads through handlers with mocked GitLab + LLM.
+"""End-to-end dry run: routes webhook payloads through the brain with mocked LLM + GitLab.
 
-No external services needed. Shows what the bot *would* do.
+No external services needed. Shows the iterative context gathering and decision flow.
 
 Usage:
     PYTHONPATH=. python scripts/test_dry_run.py
-    PYTHONPATH=. python scripts/test_dry_run.py --family anthropic   # see Claude-style prompts
-    PYTHONPATH=. python scripts/test_dry_run.py --family ollama      # see open-model prompts
 """
 
-import argparse
 import asyncio
 import os
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 os.environ.setdefault("GITBOT_GITLAB_TOKEN", "fake")
 os.environ.setdefault("GITBOT_BOT_USERNAME", "gitbot")
+os.environ.setdefault("GITBOT_LLM_FAMILY", "anthropic")
 
-from gitbot.models import Family
+import json
 
 
 EVENTS = [
     (
+        "Issue Hook — clear implementation request",
         "Issue Hook",
         {
             "object_kind": "issue",
-            "project": {"id": 1, "name": "test-project", "web_url": "https://gitlab.com/test/test-project"},
+            "user": {"username": "alice"},
+            "project": {"id": 1, "name": "test-project"},
             "object_attributes": {
                 "iid": 42,
                 "title": "Add user authentication",
-                "description": "We need JWT auth on all API endpoints.",
+                "description": "Add JWT auth to the API. Use python-jose for tokens.",
                 "action": "update",
+                "state": "opened",
             },
             "assignees": [{"username": "gitbot"}],
         },
     ),
     (
+        "Issue Hook — vague request (should ask)",
+        "Issue Hook",
+        {
+            "object_kind": "issue",
+            "user": {"username": "bob"},
+            "project": {"id": 1, "name": "test-project"},
+            "object_attributes": {
+                "iid": 43,
+                "title": "Fix the bug",
+                "description": "It's broken, please fix",
+                "action": "update",
+                "state": "opened",
+            },
+            "assignees": [{"username": "gitbot"}],
+        },
+    ),
+    (
+        "Note Hook — @mention question",
         "Note Hook",
         {
             "object_kind": "note",
-            "project": {"id": 1, "name": "test-project", "web_url": "https://gitlab.com/test/test-project"},
+            "user": {"username": "alice"},
+            "project": {"id": 1, "name": "test-project"},
             "object_attributes": {
-                "note": "@gitbot what about using bcrypt for password hashing?",
+                "note": "@gitbot should we use Redis or in-memory for sessions?",
                 "noteable_type": "Issue",
-                "discussion_id": "disc-001",
+                "discussion_id": "abc123",
+                "author": {"username": "alice"},
             },
             "issue": {"iid": 42, "title": "Add user authentication"},
         },
     ),
-    (
-        "Merge Request Hook",
-        {
-            "object_kind": "merge_request",
-            "project": {"id": 1, "name": "test-project", "web_url": "https://gitlab.com/test/test-project"},
-            "object_attributes": {
-                "iid": 7,
-                "title": "Fix SQL injection in login",
-                "description": "Parameterized the query.",
-                "action": "open",
-            },
-            "assignees": [],
-            "reviewers": [{"username": "gitbot"}],
-        },
-    ),
+]
+
+# Responses the mock LLM will return for each call
+MOCK_RESPONSES = [
+    # Issue 42: triage round 1 — fetch
+    json.dumps({"status": "fetch", "fetch_sources": ["repo_tree"]}),
+    # Issue 42: triage round 2 — ready to implement
+    json.dumps({"status": "ready", "action": "create_mr", "reasoning": "Clear requirements, I have repo context", "implementation_notes": "Use python-jose"}),
+    # Issue 42: implement
+    json.dumps({"branch_name": "feature/auth", "commit_message": "Add JWT auth", "mr_title": "Add authentication", "mr_description": "JWT auth", "files": [{"action": "create", "file_path": "auth.py", "content": "# auth code"}]}),
+    # Issue 43: triage round 1 — ask (vague)
+    json.dumps({"status": "ready", "action": "ask", "reasoning": "Too vague", "content": "What bug? Can you share error logs or steps to reproduce?", "mention": "@bob"}),
+    # Note mention: triage round 1 — comment
+    json.dumps({"status": "ready", "action": "comment", "reasoning": "Answering a design question", "content": "For a single-instance deployment, in-memory is simpler. Redis if you need horizontal scaling."}),
 ]
 
 
-async def main(family: str):
-    # Override family via env before importing config
-    os.environ["GITBOT_LLM_FAMILY"] = family
+async def main():
+    call_count = [0]
 
-    # Re-import to pick up the env change
-    import importlib
-    import gitbot.config
-    importlib.reload(gitbot.config)
-    from gitbot.config import settings
-    settings.__init__()  # re-read env
+    async def fake_llm_complete(task, *, system="", prompt):
+        idx = call_count[0]
+        call_count[0] += 1
+        resp = MOCK_RESPONSES[idx] if idx < len(MOCK_RESPONSES) else '{"status":"ready","action":"nothing"}'
+        print(f"    LLM call #{idx} (task={task}): {resp[:100]}...")
+        return resp
 
-    from gitbot.router import route_event
+    def make_noop(name):
+        def noop(*args, **kwargs):
+            print(f"    → {name}({', '.join(str(a) for a in args[:3])})")
+            return 1  # fake note ID
+        return noop
 
-    call_log = []
-
-    async def fake_complete(task, *, system="", prompt):
-        print(f"\n  --- LLM call (task={task}, family={family}) ---")
-        print(f"  System: {system[:120]}...")
-        print(f"  Prompt: {prompt[:200]}...")
-        call_log.append(task)
-        return f"[DRY RUN] Response for {task}"
-
-    def make_printer(name):
-        def printer(*args, **kwargs):
-            print(f"  -> {name}({', '.join(str(a) for a in args)})")
-        return printer
+    mock_tree = [{"path": "app.py", "type": "blob"}, {"path": "requirements.txt", "type": "blob"}]
 
     patches = [
-        patch("gitbot.handlers.llm.complete", side_effect=fake_complete),
-        patch("gitbot.handlers.glc.post_note_on_issue", side_effect=make_printer("post_note_on_issue")),
-        patch("gitbot.handlers.glc.post_note_on_mr", side_effect=make_printer("post_note_on_mr")),
-        patch("gitbot.handlers.glc.reply_to_discussion", side_effect=make_printer("reply_to_discussion")),
-        patch("gitbot.handlers.glc.get_mr_diff", return_value="--- a/login.py\n+++ b/login.py\n@@ -1 +1 @@\n-cursor.execute(f'SELECT * FROM users WHERE name={name}')\n+cursor.execute('SELECT * FROM users WHERE name=%s', (name,))"),
+        patch("gitbot.brain.llm.complete", side_effect=fake_llm_complete),
+        patch("gitbot.brain.glc.post_note_on_issue", side_effect=make_noop("post_note_on_issue")),
+        patch("gitbot.brain.glc.update_note_on_issue", side_effect=make_noop("update_note_on_issue")),
+        patch("gitbot.brain.glc.post_note_on_mr", side_effect=make_noop("post_note_on_mr")),
+        patch("gitbot.brain.glc.update_note_on_mr", side_effect=make_noop("update_note_on_mr")),
+        patch("gitbot.brain.glc.set_issue_labels", side_effect=make_noop("set_issue_labels")),
+        patch("gitbot.brain.glc.remove_issue_labels", side_effect=make_noop("remove_issue_labels")),
+        patch("gitbot.brain.glc.create_branch", side_effect=make_noop("create_branch")),
+        patch("gitbot.brain.glc.commit_files", side_effect=make_noop("commit_files")),
+        patch("gitbot.brain.glc.create_merge_request", return_value={"iid": 99, "web_url": "https://example.com/mr/99"}),
+        patch("gitbot.brain.glc.assign_mr", side_effect=make_noop("assign_mr")),
+        patch("gitbot.brain.glc.get_bot_user_id", return_value=1),
+        patch("gitbot.brain.glc.get_client"),
+        patch("gitbot.context.glc.get_client"),
+        patch("gitbot.context.glc.list_repo_tree", return_value=mock_tree),
+        patch("gitbot.context.glc.get_mr_details", return_value={"author": "gitbot", "assignees": ["gitbot"], "source_branch": "feature/x", "target_branch": "main", "state": "opened"}),
+        patch("gitbot.context.state.get_pending_question", return_value=None),
     ]
 
     for p in patches:
         p.start()
 
-    for event_type, payload in EVENTS:
+    from gitbot.router import route_event
+
+    for label, event_type, payload in EVENTS:
         print(f"\n{'='*60}")
-        print(f"Event: {event_type}")
+        print(f"  {label}")
         print(f"{'='*60}")
         await route_event(event_type, payload)
 
@@ -114,11 +139,8 @@ async def main(family: str):
         p.stop()
 
     print(f"\n{'='*60}")
-    print(f"Done! {len(call_log)} LLM calls: {', '.join(call_log)}")
+    print(f"Done! {call_count[0]} LLM calls total.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--family", default="claude-code", choices=[f.value for f in Family])
-    args = parser.parse_args()
-    asyncio.run(main(args.family))
+    asyncio.run(main())

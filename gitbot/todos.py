@@ -105,62 +105,46 @@ def _check_if_handled(project_id: int, target_type: str, target_iid: int) -> boo
 async def _replay_todo(
     project_id: int, target_type: str, target_iid: int, action: str, todo: dict
 ) -> None:
-    """Re-process a missed todo by calling the appropriate handler."""
-    from gitbot import handlers
+    """Re-process a missed todo by building a Situation and calling the brain."""
+    from gitbot.context import Situation
+    from gitbot.brain import decide_and_act
+    from gitbot.config import settings
 
     gl = glc.get_client()
     project = gl.projects.get(project_id)
 
-    if target_type == "Issue" and action == "assigned":
+    sit = Situation()
+    sit.bot_username = settings.bot_username
+    sit.project_id = project_id
+    sit.project_name = project.name
+    sit.target_type = target_type
+    sit.target_iid = target_iid
+    sit.actor = "system"  # replayed, not a real user event
+
+    if target_type == "Issue":
         issue = project.issues.get(target_iid)
-        payload = {
-            "object_attributes": {
-                "iid": target_iid,
-                "title": issue.title,
-                "description": issue.description or "",
-                "action": "update",
-            },
-            "project": {"id": project_id},
-            "assignees": [{"username": a["username"]} for a in issue.assignees],
-        }
-        await handlers.handle_issue_assigned(payload)
-
-    elif target_type == "MergeRequest" and action == "review_requested":
+        sit.target_title = issue.title
+        sit.target_description = issue.description or ""
+        sit.target_state = issue.state
+        sit.bot_is_assignee = any(a.get("username") == sit.bot_username for a in (issue.assignees or []))
+        sit.event_type = "Issue Hook"
+        sit.trigger = "assigned"
+    elif target_type == "MergeRequest":
         mr = project.mergerequests.get(target_iid)
-        payload = {
-            "object_attributes": {
-                "iid": target_iid,
-                "title": mr.title,
-                "description": mr.description or "",
-                "action": "update",
-            },
-            "project": {"id": project_id},
-            "assignees": [],
-            "reviewers": [{"username": r["username"]} for r in mr.reviewers],
-        }
-        await handlers.handle_mr_review_requested(payload)
-
-    elif target_type == "MergeRequest" and action == "assigned":
-        mr = project.mergerequests.get(target_iid)
-        payload = {
-            "object_attributes": {
-                "iid": target_iid,
-                "title": mr.title,
-                "description": mr.description or "",
-                "action": "update",
-            },
-            "project": {"id": project_id},
-            "assignees": [{"username": a["username"]} for a in mr.assignees],
-            "reviewers": [],
-        }
-        await handlers.handle_mr_assigned(payload)
-
-    elif action == "mentioned":
-        # For mentions we'd need the original note body, which the todo has
-        log.info("  -> Skipping mention replay (would need original discussion context)")
-
+        sit.target_title = mr.title
+        sit.target_description = mr.description or ""
+        sit.target_state = mr.state
+        sit.mr_source_branch = mr.source_branch
+        sit.bot_is_assignee = any(a.get("username") == sit.bot_username for a in (mr.assignees or []))
+        sit.bot_is_reviewer = any(r.get("username") == sit.bot_username for r in (mr.reviewers or []))
+        sit.bot_is_author = (mr.author.get("username") == sit.bot_username if isinstance(mr.author, dict) else False)
+        sit.event_type = "Merge Request Hook"
+        sit.trigger = "review_requested" if action == "review_requested" else "assigned"
     else:
-        log.info("  -> Don't know how to replay action=%s target=%s", action, target_type)
+        log.info("  -> Don't know how to replay target_type=%s", target_type)
+        return
+
+    await decide_and_act(sit)
 
 
 def _safe_mark_done(todo_id: int) -> None:
