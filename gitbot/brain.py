@@ -45,6 +45,10 @@ Look at the available information. Decide ONE of:
 If "ready", also pick your action and explain your reasoning.
 If "fetch", list exactly which sources you need and why.
 
+Important: Check the conversation history if available. If you or another bot
+just handled a request on this same target, don't duplicate work that was
+already completed.
+
 Available actions (for when ready):
 - "create_mr" — Create a new branch, write code, open a merge request
 - "push_commits" — Push new commits to an existing MR branch
