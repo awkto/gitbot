@@ -98,13 +98,13 @@ async def _dispatch(event_type: str, payload: dict, bot: str) -> None:
     elif event_type == "Note Hook":
         note_body = payload.get("object_attributes", {}).get("note", "")
 
-        # Check if this is a reply on a target where the bot has a pending question
-        # — even without an explicit @mention, the user is likely answering us
+        # Check if this is a reply from the user we asked a question to
         note_target = _extract_target(event_type, payload)
-        if note_target:
+        note_author = payload.get("object_attributes", {}).get("author", {}).get("username")
+        if note_target and note_author:
             pending = state.get_pending_question(*note_target)
-            if pending:
-                log.info("Note on target with pending question — treating as follow-up")
+            if pending and note_author == pending.get("asked_user"):
+                log.info("Reply from %s on target with pending question — treating as follow-up", note_author)
                 await handlers.handle_mention(payload)
                 return
 
