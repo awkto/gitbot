@@ -3,7 +3,7 @@
 import logging
 
 from gitbot.config import settings
-from gitbot import handlers, locks
+from gitbot import handlers, locks, state
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +97,17 @@ async def _dispatch(event_type: str, payload: dict, bot: str) -> None:
 
     elif event_type == "Note Hook":
         note_body = payload.get("object_attributes", {}).get("note", "")
+
+        # Check if this is a reply on a target where the bot has a pending question
+        # — even without an explicit @mention, the user is likely answering us
+        note_target = _extract_target(event_type, payload)
+        if note_target:
+            pending = state.get_pending_question(*note_target)
+            if pending:
+                log.info("Note on target with pending question — treating as follow-up")
+                await handlers.handle_mention(payload)
+                return
+
         if f"@{bot}" in note_body:
             await handlers.handle_mention(payload)
             return
