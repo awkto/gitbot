@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # Claude Code backend
     claude_code_path: str = "claude"  # path to claude CLI binary
 
+    # State
+    state_db_path: str = "data/gitbot.db"
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8042

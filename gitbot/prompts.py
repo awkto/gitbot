@@ -263,6 +263,123 @@ action: "create" for new files, "update" for existing. Write complete code, not 
     return system, user
 
 
+def triage(
+    family: Family,
+    *,
+    title: str,
+    description: str,
+    target_type: str,
+    assigner: str,
+    existing_mrs: str,
+    recent_comments: str,
+    repo_tree: str,
+) -> tuple[str, str]:
+    system = """\
+You are GitBot, an AI developer on a GitLab team. You've been assigned a task.
+Before acting, you must decide the best course of action.
+
+You MUST respond with valid JSON only — no markdown, no extra text."""
+
+    if family in (Family.ANTHROPIC, Family.CLAUDE_CODE):
+        user = f"""\
+<task>You've been assigned to this {target_type}. Decide what to do.</task>
+
+<context>
+<assigned_by>{assigner}</assigned_by>
+<title>{title}</title>
+<description>
+{description}
+</description>
+<existing_merge_requests>
+{existing_mrs}
+</existing_merge_requests>
+<recent_comments>
+{recent_comments}
+</recent_comments>
+<repository_files>
+{repo_tree}
+</repository_files>
+</context>
+
+<instructions>
+Decide ONE of these actions:
+
+1. **"implement"** — You have enough information to write code. The issue is clear,
+   there's no conflicting MR, and you know what to build.
+
+2. **"ask"** — Something is ambiguous or you need a decision from the team.
+   Examples: an MR already exists and you're not sure whether to update it or
+   create a new one; the issue is vague; there are conflicting requirements;
+   you need to know which framework/approach to use.
+
+3. **"discuss"** — This isn't a code task, or it needs analysis/planning first.
+   Example: architecture questions, investigating a bug, proposing options.
+
+Respond with JSON:
+{{
+  "action": "implement" | "ask" | "discuss",
+  "reasoning": "Brief explanation of why you chose this action",
+  "question": "The question to ask (only if action=ask)",
+  "mention": "@username to mention (only if action=ask, usually the assigner)"
+}}
+</instructions>"""
+    else:
+        user = f"""\
+You're assigned to this {target_type}.
+
+**{title}**
+{description}
+
+Existing MRs: {existing_mrs}
+Recent comments: {recent_comments}
+Repo files: {repo_tree}
+Assigned by: {assigner}
+
+Decide: "implement" (clear task, write code), "ask" (need clarification), or "discuss" (analyze/plan).
+
+JSON only:
+{{"action": "implement"|"ask"|"discuss", "reasoning": "why", "question": "if asking", "mention": "@user if asking"}}"""
+
+    return system, user
+
+
+def followup_response(
+    family: Family,
+    *,
+    original_question: str,
+    user_reply: str,
+    workflow: str,
+    context: str,
+) -> tuple[str, str]:
+    system = """\
+You are GitBot, an AI developer on a GitLab team.
+You previously asked a question and received a response.
+Decide how to proceed based on the answer.
+
+You MUST respond with valid JSON only."""
+
+    user = f"""\
+<context>
+<workflow>{workflow}</workflow>
+<your_question>{original_question}</your_question>
+<their_reply>{user_reply}</their_reply>
+<additional_context>{context}</additional_context>
+</context>
+
+Based on their reply, decide what to do next.
+
+Respond with JSON:
+{{
+  "action": "implement" | "ask" | "discuss",
+  "reasoning": "What you understood from their reply and what you'll do",
+  "question": "Follow-up question if action=ask",
+  "mention": "@user if action=ask",
+  "implementation_notes": "Specific guidance for implementation based on their answer (if action=implement)"
+}}"""
+
+    return system, user
+
+
 def clarify(family: Family, *, context: str, what_is_unclear: str) -> tuple[str, str]:
     system = _system(family)
     user = f"""\
@@ -283,4 +400,5 @@ TEMPLATES = {
     Task.MENTION_RESPONSE: mention_response,
     Task.CLARIFY: clarify,
     Task.IMPLEMENT: implement,
+    Task.TRIAGE: triage,
 }

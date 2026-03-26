@@ -56,6 +56,7 @@ class Task(StrEnum):
     MENTION_RESPONSE = "mention_response"
     CONTEXT_GATHER = "context_gather"
     IMPLEMENT = "implement"
+    TRIAGE = "triage"
 
 
 TASK_TIERS: dict[Task, Tier] = {
@@ -67,6 +68,7 @@ TASK_TIERS: dict[Task, Tier] = {
     Task.MENTION_RESPONSE: Tier.MID,
     Task.CODE_REVIEW: Tier.STRONG,
     Task.IMPLEMENT: Tier.STRONG,
+    Task.TRIAGE: Tier.MID,
 }
 
 
