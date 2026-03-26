@@ -73,21 +73,25 @@ PLAN_PROMPT = """\
 <instructions>
 Break this task into execution steps. For each step, assign a model tier:
 
-- **"cheap"** (Haiku) — Simple operations: creating issues, adding labels,
-  linking items, searching, listing, posting comments, assigning milestones.
-  Use for anything that doesn't require creative thinking or code generation.
+- **"cheap"** — Simple self-contained operations that do NOT reference IDs
+  or outputs from other steps. Examples: creating a branch, posting a comment,
+  acknowledging a task, creating a single item with hardcoded values.
+  ONLY use cheap when the step is completely independent.
 
-- **"mid"** (Sonnet) — Code generation, writing descriptions/documentation,
-  complex analysis, reviewing code, writing CI/CD configs. Use when the step
-  requires understanding code or producing quality text.
+- **"mid"** — Use for MOST steps. This includes:
+  - Any step that references IDs from previous steps (project IDs, milestone IDs,
+    epic IDs, etc.)
+  - Creating issues, epics, or milestones with descriptive content
+  - Assigning milestones/epics/iterations to issues
+  - Code generation, writing files, CI/CD configs
+  - Any step where accuracy matters
 
-- **"strong"** (Opus) — Only for tasks requiring deep reasoning: complex
-  architecture decisions, subtle security analysis, large-scale refactoring
-  plans. Most tasks do NOT need this.
+- **"strong"** — Only for tasks requiring deep reasoning: complex architecture
+  decisions, subtle security analysis, thorough code review. Rare.
 
-Default to "cheap" unless the step genuinely needs more capability.
-A task that creates 33 issues should be "cheap" — the plan already says what
-to create, execution just follows through.
+IMPORTANT: If a step needs to use IDs created in earlier steps (e.g. "assign
+milestones to issues" needs milestone IDs from a previous step), it MUST be
+"mid" not "cheap". Cheap models are unreliable at cross-referencing IDs.
 
 Respond with JSON:
 {{
