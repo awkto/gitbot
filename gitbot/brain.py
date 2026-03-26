@@ -287,11 +287,8 @@ async def _make_plan(sit: Situation, summary: str) -> dict | None:
 async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools: list[dict], previous_results: str = "") -> str:
     """Phase 3: Execute a single step with the appropriate model."""
     family = settings.llm_family
-    model = resolve_model(family, Task.IMPLEMENT, {tier: resolve_model(family, Task.IMPLEMENT, {Tier.CHEAP: resolve_model(family, Task.CLASSIFY), Tier.MID: resolve_model(family, Task.MENTION_RESPONSE), Tier.STRONG: resolve_model(family, Task.CODE_REVIEW)})})
-
-    # Simpler: just resolve the model for the requested tier directly
-    model = settings.tier_overrides() or {}
-    model_str = model.get(tier) if model else None
+    overrides = settings.tier_overrides()
+    model_str = overrides.get(tier) if overrides else None
     if not model_str:
         from gitbot.models import FAMILY_DEFAULTS
         model_str = FAMILY_DEFAULTS[family][tier]
@@ -345,34 +342,38 @@ async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools
 
 
 def _summarize_actions(actions: list[dict], comments_posted: list[str]) -> str:
+    """Summarize actions. ALWAYS includes tool results with IDs so
+    subsequent steps can reference them."""
     if not actions:
         return "*(no actions taken)*"
 
-    if actions[-1]["tool"] == "_text_response":
-        text = actions[-1]["result"]
-        real_actions = [a for a in actions if a["tool"] not in ("_text_response", "post_comment")]
-        if not real_actions:
-            return text
-
+    # Always build the raw results list — this is what gets passed to next steps
     parts = []
     for a in actions:
         if a["tool"] in ("_text_response", "post_comment"):
             continue
+        # Keep full results for ID-bearing operations, truncate others
         result = a["result"]
-        if len(result) > 200:
+        if a["tool"] in ("create_project", "create_group", "create_issue",
+                          "create_milestone", "create_epic", "create_merge_request",
+                          "create_iteration_cadence", "create_iteration",
+                          "create_branch"):
+            # Keep full result — IDs are critical for subsequent steps
+            pass
+        elif len(result) > 200:
             result = result[:200] + "..."
         parts.append(f"- **{a['tool']}**: {result}")
 
+    # Include model's final text if present
+    final = next((a["result"] for a in reversed(actions) if a["tool"] == "_text_response"), None)
+
     if not parts:
-        if actions[-1]["tool"] == "_text_response":
-            return actions[-1]["result"]
-        return "*(completed)*"
+        return final or "*(completed)*"
 
     summary_text = "\n".join(parts)
-    final = next((a["result"] for a in reversed(actions) if a["tool"] == "_text_response"), None)
     if final:
-        return f"{final}\n\n**Actions:**\n{summary_text}"
-    return f"**Actions:**\n{summary_text}"
+        return f"{final}\n\n**Actions and IDs:**\n{summary_text}"
+    return f"**Actions and IDs:**\n{summary_text}"
 
 
 # ---------------------------------------------------------------------------
