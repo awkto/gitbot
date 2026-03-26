@@ -10,6 +10,7 @@ Anthropic, OpenAI, and Ollama.
 
 import logging
 from gitbot import gitlab_client as glc
+from gitbot.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -474,8 +475,44 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "create_iteration_cadence",
+            "description": "Create an iteration cadence (sprint schedule) in a group. This is required before iterations can be created.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_path": {"type": "string"},
+                    "title": {"type": "string", "description": "Cadence name, e.g. 'Development Sprints'"},
+                    "duration_in_weeks": {"type": "integer", "description": "Sprint duration: 1, 2, 3, or 4 weeks"},
+                    "start_date": {"type": "string", "description": "YYYY-MM-DD — when first iteration starts"},
+                    "iterations_in_advance": {"type": "integer", "description": "How many future iterations to auto-create (default 2)"},
+                    "automatic": {"type": "boolean", "description": "Auto-create iterations (default true)"},
+                },
+                "required": ["group_path", "title", "start_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_iteration",
+            "description": "Create a single iteration (sprint) within a group. Requires an iteration cadence to exist first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_path": {"type": "string"},
+                    "title": {"type": "string"},
+                    "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "due_date": {"type": "string", "description": "YYYY-MM-DD"},
+                },
+                "required": ["group_path", "title", "start_date", "due_date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_iterations",
-            "description": "List iterations (sprints) for the project's group. Iterations are group-level.",
+            "description": "List iterations (sprints) for a group.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -924,6 +961,97 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
             target.milestone_id = args["milestone_id"]
             target.save()
             return f"Assigned milestone {args['milestone_id']} to {args['target_type']} #{args['target_iid']}"
+
+        elif tool_name == "create_iteration_cadence":
+            import requests
+            query = """
+            mutation($input: IterationCadenceCreateInput!) {
+              iterationCadenceCreate(input: $input) {
+                iterationCadence { id title }
+                errors
+              }
+            }
+            """
+            variables = {
+                "input": {
+                    "groupPath": args["group_path"],
+                    "title": args["title"],
+                    "startDate": args["start_date"],
+                    "durationInWeeks": args.get("duration_in_weeks", 2),
+                    "iterationsInAdvance": args.get("iterations_in_advance", 2),
+                    "automatic": args.get("automatic", True),
+                    "active": True,
+                }
+            }
+            r = requests.post(
+                f"{settings.gitlab_url}/api/graphql",
+                headers={"PRIVATE-TOKEN": settings.gitlab_token},
+                json={"query": query, "variables": variables},
+                verify=settings.gitlab_ssl_verify,
+            )
+            data = r.json()
+            if data.get("errors"):
+                return f"Error: {data['errors']}"
+            result = data.get("data", {}).get("iterationCadenceCreate", {})
+            if result.get("errors"):
+                return f"Error: {result['errors']}"
+            cadence = result.get("iterationCadence", {})
+            return f"Created iteration cadence: {cadence.get('title')} (id={cadence.get('id')})"
+
+        elif tool_name == "create_iteration":
+            import requests
+            # First find the cadence for this group
+            list_query = """
+            query($groupPath: ID!) {
+              group(fullPath: $groupPath) {
+                iterationCadences(first: 1) {
+                  nodes { id title }
+                }
+              }
+            }
+            """
+            r = requests.post(
+                f"{settings.gitlab_url}/api/graphql",
+                headers={"PRIVATE-TOKEN": settings.gitlab_token},
+                json={"query": list_query, "variables": {"groupPath": args["group_path"]}},
+                verify=settings.gitlab_ssl_verify,
+            )
+            cadences = r.json().get("data", {}).get("group", {}).get("iterationCadences", {}).get("nodes", [])
+            if not cadences:
+                return "Error: No iteration cadence found. Create one first with create_iteration_cadence."
+            cadence_id = cadences[0]["id"]
+
+            query = """
+            mutation($input: iterationCreateInput!) {
+              iterationCreate(input: $input) {
+                iteration { id title startDate dueDate }
+                errors
+              }
+            }
+            """
+            variables = {
+                "input": {
+                    "groupPath": args["group_path"],
+                    "iterationCadenceId": cadence_id,
+                    "title": args["title"],
+                    "startDate": args["start_date"],
+                    "dueDate": args["due_date"],
+                }
+            }
+            r = requests.post(
+                f"{settings.gitlab_url}/api/graphql",
+                headers={"PRIVATE-TOKEN": settings.gitlab_token},
+                json={"query": query, "variables": variables},
+                verify=settings.gitlab_ssl_verify,
+            )
+            data = r.json()
+            if data.get("errors"):
+                return f"Error: {data['errors']}"
+            result = data.get("data", {}).get("iterationCreate", {})
+            if result.get("errors"):
+                return f"Error: {result['errors']}"
+            it = result.get("iteration", {})
+            return f"Created iteration: {it.get('title')} (id={it.get('id')}, {it.get('startDate')} to {it.get('dueDate')})"
 
         elif tool_name == "list_iterations":
             group = gl.groups.get(args["group_path"])
