@@ -118,10 +118,18 @@ Full context:
 Overall plan:
 {plan_summary}
 
+Results from previous steps:
+{previous_results}
+
 Your current step: {step_description}
 
+IMPORTANT: Use IDs returned by previous steps (project IDs, group IDs,
+milestone IDs, etc.) — do NOT guess or make up IDs. If a previous step
+created a project with id=39, use project_id=39 when creating issues in it.
+
 Use the tools to complete THIS STEP ONLY. When done with this step,
-send a short text summary of what you accomplished.
+send a short text summary of what you accomplished, including any IDs
+created so future steps can reference them.
 
 Tips:
 - Call multiple tools in parallel when operations are independent
@@ -152,7 +160,7 @@ async def decide_and_act(sit: Situation) -> None:
         if sit.target_type == "Issue":
             glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
 
-        result = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS)
+        result = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS, "")
         _update_placeholder(sit, placeholder_id, result)
         _clear_labels(sit)
     else:
@@ -168,18 +176,24 @@ async def decide_and_act(sit: Situation) -> None:
             glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
 
         step_results = []
+        accumulated_results = ""  # pass to each step so it knows what happened before
         for i, step in enumerate(plan["steps"]):
             tier = Tier(step.get("tier", "cheap"))
             desc = step.get("description", f"Step {i+1}")
             log.info("Executing step %d/%d [%s]: %s",
                      i + 1, len(plan["steps"]), tier, desc[:80])
 
-            result = await _execute_step(sit, desc, tier, TOOL_SCHEMAS)
+            result = await _execute_step(sit, desc, tier, TOOL_SCHEMAS, accumulated_results)
             step_results.append(f"**Step {i+1}**: {desc}\n{result}")
+
+            # Accumulate results for next steps (keep it concise)
+            accumulated_results += f"\n\nStep {i+1} ({desc}): {result}"
+            # Cap accumulated results to avoid blowing up context
+            if len(accumulated_results) > 6000:
+                accumulated_results = accumulated_results[-6000:]
 
             # Update checklist — mark step as done
             if checklist:
-                # Replace the first unchecked box with a checked one
                 checklist = checklist.replace("- [ ]", "- [x]", 1)
                 _update_placeholder(sit, placeholder_id, checklist)
 
@@ -270,7 +284,7 @@ async def _make_plan(sit: Situation, summary: str) -> dict | None:
     return plan
 
 
-async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools: list[dict]) -> str:
+async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools: list[dict], previous_results: str = "") -> str:
     """Phase 3: Execute a single step with the appropriate model."""
     family = settings.llm_family
     model = resolve_model(family, Task.IMPLEMENT, {tier: resolve_model(family, Task.IMPLEMENT, {Tier.CHEAP: resolve_model(family, Task.CLASSIFY), Tier.MID: resolve_model(family, Task.MENTION_RESPONSE), Tier.STRONG: resolve_model(family, Task.CODE_REVIEW)})})
@@ -290,6 +304,7 @@ async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools
         situation=sit.to_prompt(),
         plan_summary=step_description,
         step_description=step_description,
+        previous_results=previous_results if previous_results else "(this is the first step)",
     )
 
     if sit.comment_body:
