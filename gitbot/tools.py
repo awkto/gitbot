@@ -365,6 +365,225 @@ TOOL_SCHEMAS = [
         },
     },
 
+    # --- Epics (Group-level) ---
+    {
+        "type": "function",
+        "function": {
+            "name": "create_epic",
+            "description": "Create an epic in the project's parent group. Epics are group-level and contain issues across projects.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_path": {"type": "string", "description": "Group path (e.g. 'gbtest'). Required."},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "labels": {"type": "string", "description": "Comma-separated labels"},
+                    "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "due_date": {"type": "string", "description": "YYYY-MM-DD"},
+                },
+                "required": ["group_path", "title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_epics",
+            "description": "List epics in a group.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_path": {"type": "string"},
+                    "state": {"type": "string", "enum": ["opened", "closed", "all"]},
+                    "search": {"type": "string"},
+                },
+                "required": ["group_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_issue_to_epic",
+            "description": "Add an issue to an epic.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_path": {"type": "string"},
+                    "epic_iid": {"type": "integer"},
+                    "issue_id": {"type": "integer", "description": "The global issue ID (not iid). Use search_issues to find it."},
+                },
+                "required": ["group_path", "epic_iid", "issue_id"],
+            },
+        },
+    },
+
+    # --- Milestones (expanded) ---
+    {
+        "type": "function",
+        "function": {
+            "name": "list_milestones",
+            "description": "List project milestones.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "state": {"type": "string", "enum": ["active", "closed"]},
+                    "search": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "assign_milestone",
+            "description": "Assign a milestone to an issue or merge request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_type": {"type": "string", "enum": ["issue", "merge_request"]},
+                    "target_iid": {"type": "integer"},
+                    "milestone_id": {"type": "integer"},
+                },
+                "required": ["target_type", "target_iid", "milestone_id"],
+            },
+        },
+    },
+
+    # --- Iterations ---
+    {
+        "type": "function",
+        "function": {
+            "name": "list_iterations",
+            "description": "List iterations (sprints) for the project's group. Iterations are group-level.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_path": {"type": "string"},
+                    "state": {"type": "string", "enum": ["opened", "upcoming", "current", "closed"]},
+                },
+                "required": ["group_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "assign_iteration",
+            "description": "Assign an iteration to an issue.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "issue_iid": {"type": "integer"},
+                    "iteration_id": {"type": "integer"},
+                },
+                "required": ["issue_iid", "iteration_id"],
+            },
+        },
+    },
+
+    # --- Projects ---
+    {
+        "type": "function",
+        "function": {
+            "name": "create_project",
+            "description": "Create a new GitLab project (repository).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "path": {"type": "string", "description": "URL slug (defaults to slugified name)"},
+                    "namespace_id": {"type": "integer", "description": "Group/namespace ID to create in (omit for user namespace)"},
+                    "description": {"type": "string"},
+                    "visibility": {"type": "string", "enum": ["private", "internal", "public"]},
+                    "initialize_with_readme": {"type": "boolean"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_project_info",
+            "description": "Get project details including description, default branch, visibility, and web URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id_or_path": {"type": "string", "description": "Project ID or path (e.g. 'gbtest/test2')"},
+                },
+                "required": ["project_id_or_path"],
+            },
+        },
+    },
+
+    # --- Groups ---
+    {
+        "type": "function",
+        "function": {
+            "name": "create_group",
+            "description": "Create a new GitLab group or subgroup.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "path": {"type": "string"},
+                    "parent_id": {"type": "integer", "description": "Parent group ID for subgroups (omit for top-level)"},
+                    "description": {"type": "string"},
+                    "visibility": {"type": "string", "enum": ["private", "internal", "public"]},
+                },
+                "required": ["name", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_groups",
+            "description": "List groups the bot has access to.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "search": {"type": "string"},
+                },
+            },
+        },
+    },
+
+    # --- Members ---
+    {
+        "type": "function",
+        "function": {
+            "name": "list_members",
+            "description": "List members of a project or group.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["project", "group"], "description": "Whether to list project or group members"},
+                    "scope_id_or_path": {"type": "string", "description": "Project ID or group path"},
+                },
+                "required": ["scope", "scope_id_or_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_member",
+            "description": "Add a member to a project or group.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["project", "group"]},
+                    "scope_id_or_path": {"type": "string"},
+                    "username": {"type": "string"},
+                    "access_level": {"type": "integer", "description": "10=Guest, 20=Reporter, 30=Developer, 40=Maintainer, 50=Owner"},
+                },
+                "required": ["scope", "scope_id_or_path", "username", "access_level"],
+            },
+        },
+    },
+
     # --- Security ---
     {
         "type": "function",
@@ -597,6 +816,147 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
                 data["variables"] = args["variables"]
             p = project.pipelines.create(data)
             return f"Triggered pipeline #{p.id} on {args['ref']}\nURL: {p.web_url}"
+
+        elif tool_name == "create_epic":
+            group = gl.groups.get(args["group_path"])
+            data = {"title": args["title"]}
+            for field in ["description", "labels", "start_date", "due_date"]:
+                if args.get(field):
+                    data[field] = args[field]
+            epic = group.epics.create(data)
+            return f"Created epic &{epic.iid}: {epic.title}\nURL: {epic.web_url}"
+
+        elif tool_name == "list_epics":
+            group = gl.groups.get(args["group_path"])
+            kwargs = {"per_page": 20}
+            if args.get("state"):
+                kwargs["state"] = args["state"]
+            if args.get("search"):
+                kwargs["search"] = args["search"]
+            epics = group.epics.list(**kwargs)
+            if not epics:
+                return "No epics found."
+            lines = [f"Found {len(epics)} epic(s):"]
+            for e in epics:
+                lines.append(f"  &{e.iid}: {e.title} (state={e.state})")
+            return "\n".join(lines)
+
+        elif tool_name == "add_issue_to_epic":
+            group = gl.groups.get(args["group_path"])
+            epic = group.epics.get(args["epic_iid"])
+            epic.issues.create({"issue_id": args["issue_id"]})
+            return f"Added issue to epic &{args['epic_iid']}"
+
+        elif tool_name == "list_milestones":
+            kwargs = {"per_page": 20}
+            if args.get("state"):
+                kwargs["state"] = args["state"]
+            if args.get("search"):
+                kwargs["search"] = args["search"]
+            milestones = project.milestones.list(**kwargs)
+            if not milestones:
+                return "No milestones found."
+            lines = [f"Found {len(milestones)} milestone(s):"]
+            for m in milestones:
+                due = f", due {m.due_date}" if m.due_date else ""
+                lines.append(f"  id={m.id}: {m.title} (state={m.state}{due})")
+            return "\n".join(lines)
+
+        elif tool_name == "assign_milestone":
+            if args["target_type"] == "issue":
+                target = project.issues.get(args["target_iid"])
+            else:
+                target = project.mergerequests.get(args["target_iid"])
+            target.milestone_id = args["milestone_id"]
+            target.save()
+            return f"Assigned milestone {args['milestone_id']} to {args['target_type']} #{args['target_iid']}"
+
+        elif tool_name == "list_iterations":
+            group = gl.groups.get(args["group_path"])
+            kwargs = {"per_page": 20}
+            if args.get("state"):
+                kwargs["state"] = args["state"]
+            try:
+                iterations = group.iterations.list(**kwargs)
+                if not iterations:
+                    return "No iterations found."
+                lines = [f"Found {len(iterations)} iteration(s):"]
+                for it in iterations:
+                    lines.append(f"  id={it.id}: {it.title} ({it.start_date} to {it.due_date}, state={it.state})")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"Could not list iterations: {e}"
+
+        elif tool_name == "assign_iteration":
+            issue = project.issues.get(args["issue_iid"])
+            issue.iteration_id = args["iteration_id"]
+            issue.save()
+            return f"Assigned iteration {args['iteration_id']} to issue #{args['issue_iid']}"
+
+        elif tool_name == "create_project":
+            data = {"name": args["name"]}
+            for field in ["path", "namespace_id", "description", "visibility", "initialize_with_readme"]:
+                if args.get(field) is not None:
+                    data[field] = args[field]
+            new_project = gl.projects.create(data)
+            return f"Created project: {new_project.path_with_namespace}\nURL: {new_project.web_url}"
+
+        elif tool_name == "get_project_info":
+            p = gl.projects.get(args["project_id_or_path"])
+            return (
+                f"Project: {p.path_with_namespace}\n"
+                f"Description: {p.description or '(none)'}\n"
+                f"Default branch: {p.default_branch}\n"
+                f"Visibility: {p.visibility}\n"
+                f"URL: {p.web_url}\n"
+                f"Created: {p.created_at}"
+            )
+
+        elif tool_name == "create_group":
+            data = {"name": args["name"], "path": args["path"]}
+            for field in ["parent_id", "description", "visibility"]:
+                if args.get(field) is not None:
+                    data[field] = args[field]
+            group = gl.groups.create(data)
+            return f"Created group: {group.full_path}\nURL: {group.web_url}"
+
+        elif tool_name == "list_groups":
+            kwargs = {"per_page": 20}
+            if args.get("search"):
+                kwargs["search"] = args["search"]
+            groups = gl.groups.list(**kwargs)
+            if not groups:
+                return "No groups found."
+            lines = [f"Found {len(groups)} group(s):"]
+            for g in groups:
+                lines.append(f"  {g.full_path} (id={g.id}, visibility={g.visibility})")
+            return "\n".join(lines)
+
+        elif tool_name == "list_members":
+            if args["scope"] == "project":
+                target = gl.projects.get(args["scope_id_or_path"])
+            else:
+                target = gl.groups.get(args["scope_id_or_path"])
+            members = target.members.list(per_page=50)
+            if not members:
+                return "No members found."
+            lines = [f"Found {len(members)} member(s):"]
+            level_names = {10: "Guest", 20: "Reporter", 30: "Developer", 40: "Maintainer", 50: "Owner"}
+            for m in members:
+                role = level_names.get(m.access_level, str(m.access_level))
+                lines.append(f"  @{m.username} ({role})")
+            return "\n".join(lines)
+
+        elif tool_name == "add_member":
+            if args["scope"] == "project":
+                target = gl.projects.get(args["scope_id_or_path"])
+            else:
+                target = gl.groups.get(args["scope_id_or_path"])
+            users = gl.users.list(username=args["username"])
+            if not users:
+                return f"User '{args['username']}' not found."
+            target.members.create({"user_id": users[0].id, "access_level": args["access_level"]})
+            return f"Added @{args['username']} as {args['access_level']} to {args['scope']} {args['scope_id_or_path']}"
 
         elif tool_name == "list_vulnerabilities":
             kwargs = {"per_page": 20}
