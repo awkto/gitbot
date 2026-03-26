@@ -14,18 +14,62 @@ def get_client() -> gitlab.Gitlab:
     return _gl
 
 
-def post_note_on_issue(project_id: int, issue_iid: int, body: str) -> None:
+def post_note_on_issue(project_id: int, issue_iid: int, body: str) -> int:
+    """Post a note and return its ID (for later editing)."""
     gl = get_client()
     project = gl.projects.get(project_id)
     issue = project.issues.get(issue_iid)
-    issue.notes.create({"body": body})
+    note = issue.notes.create({"body": body})
+    return note.id
 
 
-def post_note_on_mr(project_id: int, mr_iid: int, body: str) -> None:
+def update_note_on_issue(project_id: int, issue_iid: int, note_id: int, body: str) -> None:
+    """Edit an existing note in-place."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    issue = project.issues.get(issue_iid)
+    note = issue.notes.get(note_id)
+    note.body = body
+    note.save()
+
+
+def post_note_on_mr(project_id: int, mr_iid: int, body: str) -> int:
+    """Post a note and return its ID (for later editing)."""
     gl = get_client()
     project = gl.projects.get(project_id)
     mr = project.mergerequests.get(mr_iid)
-    mr.notes.create({"body": body})
+    note = mr.notes.create({"body": body})
+    return note.id
+
+
+def update_note_on_mr(project_id: int, mr_iid: int, note_id: int, body: str) -> None:
+    """Edit an existing note in-place."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    mr = project.mergerequests.get(mr_iid)
+    note = mr.notes.get(note_id)
+    note.body = body
+    note.save()
+
+
+def set_issue_labels(project_id: int, issue_iid: int, labels: list[str]) -> None:
+    """Add labels to an issue (merges with existing)."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    issue = project.issues.get(issue_iid)
+    existing = [l for l in (issue.labels or [])]
+    merged = list(set(existing + labels))
+    issue.labels = merged
+    issue.save()
+
+
+def remove_issue_labels(project_id: int, issue_iid: int, labels: list[str]) -> None:
+    """Remove labels from an issue."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    issue = project.issues.get(issue_iid)
+    issue.labels = [l for l in (issue.labels or []) if l not in labels]
+    issue.save()
 
 
 def reply_to_discussion(
