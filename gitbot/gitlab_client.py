@@ -61,3 +61,57 @@ def get_file_content(project_id: int, file_path: str, ref: str = "main") -> str:
     project = gl.projects.get(project_id)
     f = project.files.get(file_path=file_path, ref=ref)
     return f.decode().decode("utf-8")
+
+
+def list_repo_tree(project_id: int, path: str = "", ref: str = "main") -> list[dict]:
+    """List files/dirs in a repo path."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    return list(project.repository_tree(path=path, ref=ref, all=True))
+
+
+def create_branch(project_id: int, branch_name: str, ref: str = "main") -> None:
+    """Create a new branch from ref."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    project.branches.create({"branch": branch_name, "ref": ref})
+
+
+def commit_files(
+    project_id: int,
+    branch: str,
+    message: str,
+    actions: list[dict],
+) -> dict:
+    """Create a commit with multiple file actions.
+
+    Each action is a dict like:
+        {"action": "create", "file_path": "path/to/file", "content": "..."}
+    Valid actions: create, update, delete, move
+    """
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    return project.commits.create({
+        "branch": branch,
+        "commit_message": message,
+        "actions": actions,
+    })
+
+
+def create_merge_request(
+    project_id: int,
+    source_branch: str,
+    target_branch: str,
+    title: str,
+    description: str,
+) -> dict:
+    """Create an MR and return its attributes."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    mr = project.mergerequests.create({
+        "source_branch": source_branch,
+        "target_branch": target_branch,
+        "title": title,
+        "description": description,
+    })
+    return {"iid": mr.iid, "web_url": mr.web_url}

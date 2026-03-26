@@ -23,9 +23,9 @@ class Family(StrEnum):
 # Default model for each (family, tier). Users can override via config.
 FAMILY_DEFAULTS: dict[Family, dict[Tier, str]] = {
     Family.ANTHROPIC: {
-        Tier.CHEAP: "claude-haiku-4-5-20251001",
-        Tier.MID: "claude-sonnet-4-5-20241022",
-        Tier.STRONG: "claude-opus-4-20250514",
+        Tier.CHEAP: "anthropic/claude-haiku-4-5-20251001",
+        Tier.MID: "anthropic/claude-sonnet-4-20250514",
+        Tier.STRONG: "anthropic/claude-opus-4-20250514",
     },
     Family.OPENAI: {
         Tier.CHEAP: "gpt-4o-mini",
@@ -55,6 +55,7 @@ class Task(StrEnum):
     CODE_REVIEW = "code_review"
     MENTION_RESPONSE = "mention_response"
     CONTEXT_GATHER = "context_gather"
+    IMPLEMENT = "implement"
 
 
 TASK_TIERS: dict[Task, Tier] = {
@@ -65,6 +66,7 @@ TASK_TIERS: dict[Task, Tier] = {
     Task.MR_SUMMARY: Tier.MID,
     Task.MENTION_RESPONSE: Tier.MID,
     Task.CODE_REVIEW: Tier.STRONG,
+    Task.IMPLEMENT: Tier.STRONG,
 }
 
 

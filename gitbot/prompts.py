@@ -181,6 +181,88 @@ Respond helpfully. Ask for context if needed."""
     return system, user
 
 
+def implement(
+    family: Family, *, title: str, description: str, repo_tree: str, default_branch: str
+) -> tuple[str, str]:
+    system = """\
+You are GitBot, an AI developer embedded in a GitLab team.
+You implement code by creating files directly in the repository.
+You have full access to create branches, commit files, and open merge requests.
+
+You MUST respond with valid JSON only — no markdown, no explanation outside the JSON.
+"""
+
+    if family in (Family.ANTHROPIC, Family.CLAUDE_CODE):
+        user = f"""\
+<task>Implement the following GitLab issue by writing the code.</task>
+
+<issue>
+<title>{title}</title>
+<description>
+{description}
+</description>
+</issue>
+
+<repository>
+<default_branch>{default_branch}</default_branch>
+<tree>
+{repo_tree}
+</tree>
+</repository>
+
+<instructions>
+You are working inside a GitLab repository. Implement the requested changes by producing
+the files that need to be created or modified.
+
+Respond with a JSON object in this exact format:
+{{
+  "branch_name": "feature/short-descriptive-name",
+  "commit_message": "Add feature X as described in issue",
+  "mr_title": "Short MR title",
+  "mr_description": "Description of what was implemented and why",
+  "files": [
+    {{
+      "action": "create",
+      "file_path": "path/to/file.ext",
+      "content": "full file content here"
+    }}
+  ]
+}}
+
+Rules:
+- "action" must be "create" for new files or "update" for existing files
+- File paths must be relative to the repo root
+- Include ALL files needed for a complete, working implementation
+- Write production-quality code, not stubs or placeholders
+- Respond ONLY with the JSON object, no other text
+</instructions>"""
+    else:
+        user = f"""\
+Implement this GitLab issue by writing code.
+
+**{title}**
+
+{description}
+
+**Repo files (default branch: {default_branch}):**
+{repo_tree}
+
+Respond with ONLY a JSON object:
+{{
+  "branch_name": "feature/short-name",
+  "commit_message": "Description of changes",
+  "mr_title": "Short MR title",
+  "mr_description": "What was implemented",
+  "files": [
+    {{"action": "create", "file_path": "path/to/file", "content": "full content"}}
+  ]
+}}
+
+action: "create" for new files, "update" for existing. Write complete code, not stubs."""
+
+    return system, user
+
+
 def clarify(family: Family, *, context: str, what_is_unclear: str) -> tuple[str, str]:
     system = _system(family)
     user = f"""\
@@ -200,4 +282,5 @@ TEMPLATES = {
     Task.CODE_REVIEW: code_review,
     Task.MENTION_RESPONSE: mention_response,
     Task.CLARIFY: clarify,
+    Task.IMPLEMENT: implement,
 }
