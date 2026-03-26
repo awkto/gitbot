@@ -1,0 +1,203 @@
+"""Prompt templates per (task, model_family).
+
+Claude works best with XML structure and detailed instructions.
+Open models work better with shorter, direct prompts.
+OpenAI is in between.
+"""
+
+from gitbot.models import Family, Task
+
+
+def _system(family: Family) -> str:
+    """Base system prompt, tuned per family."""
+    if family in (Family.ANTHROPIC, Family.CLAUDE_CODE):
+        return """\
+You are GitBot, an AI assistant embedded in a GitLab team.
+You communicate exclusively through GitLab comments — be concise and professional.
+Use markdown formatting. When reviewing code, be thorough but not pedantic.
+If you need more context, ask specific questions rather than guessing.
+
+<guidelines>
+- Lead with the most important finding or answer
+- Use code blocks with language hints for any code snippets
+- Keep responses under 500 words unless the task demands more
+- For reviews: categorize findings as 🔴 bug, 🟡 suggestion, or 🟢 nitpick
+</guidelines>"""
+
+    if family == Family.OPENAI:
+        return """\
+You are GitBot, an AI assistant on a GitLab team.
+Communicate through GitLab comments. Be concise and professional. Use markdown.
+When reviewing code: categorize as 🔴 bug, 🟡 suggestion, or 🟢 nitpick.
+Ask for clarification rather than guessing."""
+
+    # Ollama / open models — keep it short, they drift on long system prompts
+    return """\
+You are GitBot, an AI code assistant. Respond in markdown. Be concise.
+For code reviews: mark issues as 🔴 bug, 🟡 suggestion, or 🟢 nitpick."""
+
+
+# --- Task prompt templates ---
+# Each returns (system, user_prompt) for the given family.
+# Variables are passed as a dict and formatted into the template.
+
+
+def issue_analysis(family: Family, *, title: str, description: str) -> tuple[str, str]:
+    system = _system(family)
+
+    if family in (Family.ANTHROPIC, Family.CLAUDE_CODE):
+        user = f"""\
+<task>You have been assigned to this GitLab issue.</task>
+
+<issue>
+<title>{title}</title>
+<description>
+{description}
+</description>
+</issue>
+
+<instructions>
+Analyze this issue and respond with:
+1. Your understanding of what's being asked
+2. A proposed approach or plan (if enough info)
+3. Specific clarifying questions (if the issue is ambiguous)
+</instructions>"""
+    else:
+        user = f"""\
+You've been assigned to this issue.
+
+**{title}**
+
+{description}
+
+---
+Analyze this and either propose a plan or ask clarifying questions."""
+
+    return system, user
+
+
+def mr_summary(family: Family, *, title: str, description: str, diff: str) -> tuple[str, str]:
+    system = _system(family)
+
+    if family in (Family.ANTHROPIC, Family.CLAUDE_CODE):
+        user = f"""\
+<task>You have been assigned to this merge request.</task>
+
+<merge_request>
+<title>{title}</title>
+<description>{description}</description>
+<diff>
+{diff}
+</diff>
+</merge_request>
+
+<instructions>
+Summarize what this MR does and flag any concerns.
+</instructions>"""
+    else:
+        user = f"""\
+You're assigned to this MR.
+
+**{title}**: {description}
+
+```diff
+{diff}
+```
+
+Summarize the changes and flag any concerns."""
+
+    return system, user
+
+
+def code_review(family: Family, *, title: str, description: str, diff: str) -> tuple[str, str]:
+    system = _system(family)
+
+    if family in (Family.ANTHROPIC, Family.CLAUDE_CODE):
+        user = f"""\
+<task>Perform a thorough code review of this merge request.</task>
+
+<merge_request>
+<title>{title}</title>
+<description>{description}</description>
+<diff>
+{diff}
+</diff>
+</merge_request>
+
+<review_checklist>
+- Bugs and logic errors
+- Security vulnerabilities (injection, auth bypass, data exposure)
+- Performance issues (N+1 queries, unbounded loops, memory leaks)
+- Error handling gaps
+- Code clarity and maintainability
+- Race conditions or concurrency issues
+</review_checklist>
+
+<format>
+Group findings by file. Use 🔴 🟡 🟢 severity markers.
+If the code looks good, say so briefly — don't invent problems.
+</format>"""
+    else:
+        user = f"""\
+Review this MR carefully.
+
+**{title}**: {description}
+
+```diff
+{diff}
+```
+
+Check for: bugs, security issues, performance, error handling, clarity.
+Use 🔴 bug / 🟡 suggestion / 🟢 nitpick. Group by file."""
+
+    return system, user
+
+
+def mention_response(
+    family: Family, *, note_body: str, noteable_type: str, noteable_title: str
+) -> tuple[str, str]:
+    system = _system(family)
+
+    if family in (Family.ANTHROPIC, Family.CLAUDE_CODE):
+        user = f"""\
+<task>Someone mentioned you in a {noteable_type} comment. Respond helpfully.</task>
+
+<context>
+<noteable type="{noteable_type}" title="{noteable_title}" />
+<comment>{note_body}</comment>
+</context>
+
+<instructions>
+Respond to what was asked. If you need more context to give a good answer, ask.
+</instructions>"""
+    else:
+        user = f"""\
+You were mentioned in a {noteable_type} ({noteable_title}):
+
+> {note_body}
+
+Respond helpfully. Ask for context if needed."""
+
+    return system, user
+
+
+def clarify(family: Family, *, context: str, what_is_unclear: str) -> tuple[str, str]:
+    system = _system(family)
+    user = f"""\
+Context: {context}
+
+You need more information. Specifically: {what_is_unclear}
+
+Write a concise GitLab comment asking for the missing information."""
+
+    return system, user
+
+
+# Registry for easy lookup
+TEMPLATES = {
+    Task.ISSUE_ANALYSIS: issue_analysis,
+    Task.MR_SUMMARY: mr_summary,
+    Task.CODE_REVIEW: code_review,
+    Task.MENTION_RESPONSE: mention_response,
+    Task.CLARIFY: clarify,
+}
