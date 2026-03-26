@@ -266,6 +266,105 @@ TOOL_SCHEMAS = [
         },
     },
 
+    # --- Pipelines ---
+    {
+        "type": "function",
+        "function": {
+            "name": "list_pipelines",
+            "description": "List recent CI/CD pipelines for the project, optionally filtered by status, ref, or source.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["running", "pending", "success", "failed", "canceled", "skipped", "created", "manual"]},
+                    "ref": {"type": "string", "description": "Branch or tag name"},
+                    "per_page": {"type": "integer", "description": "Number of results (default 10, max 100)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pipeline",
+            "description": "Get details of a specific pipeline by ID, including its status and duration.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pipeline_id": {"type": "integer"},
+                },
+                "required": ["pipeline_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_pipeline_jobs",
+            "description": "List jobs in a pipeline. Shows job name, stage, status, and duration.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pipeline_id": {"type": "integer"},
+                },
+                "required": ["pipeline_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_job_log",
+            "description": "Get the log/trace output of a specific CI/CD job. Useful for diagnosing failures.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "integer"},
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "retry_pipeline",
+            "description": "Retry a failed pipeline.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pipeline_id": {"type": "integer"},
+                },
+                "required": ["pipeline_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_pipeline",
+            "description": "Trigger a new pipeline on a specific branch.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ref": {"type": "string", "description": "Branch or tag to run the pipeline on"},
+                    "variables": {
+                        "type": "array",
+                        "description": "Pipeline variables",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "value": {"type": "string"},
+                            },
+                            "required": ["key", "value"],
+                        },
+                    },
+                },
+                "required": ["ref"],
+            },
+        },
+    },
+
     # --- Security ---
     {
         "type": "function",
@@ -440,6 +539,64 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
                 "content": args["content"],
             })
             return f"Created wiki page: {page.title}"
+
+        elif tool_name == "list_pipelines":
+            kwargs = {"per_page": args.get("per_page", 10)}
+            if args.get("status"):
+                kwargs["status"] = args["status"]
+            if args.get("ref"):
+                kwargs["ref"] = args["ref"]
+            pipelines = project.pipelines.list(**kwargs)
+            if not pipelines:
+                return "No pipelines found."
+            lines = [f"Found {len(pipelines)} pipeline(s):"]
+            for p in pipelines:
+                duration = f", {p.duration}s" if hasattr(p, "duration") and p.duration else ""
+                lines.append(f"  #{p.id}: {p.status} (ref={p.ref}{duration}) {p.web_url}")
+            return "\n".join(lines)
+
+        elif tool_name == "get_pipeline":
+            p = project.pipelines.get(args["pipeline_id"])
+            return (
+                f"Pipeline #{p.id}\n"
+                f"Status: {p.status}\n"
+                f"Ref: {p.ref}\n"
+                f"Duration: {p.duration}s\n"
+                f"Created: {p.created_at}\n"
+                f"Finished: {p.finished_at}\n"
+                f"URL: {p.web_url}"
+            )
+
+        elif tool_name == "list_pipeline_jobs":
+            pipeline = project.pipelines.get(args["pipeline_id"])
+            jobs = pipeline.jobs.list(per_page=50)
+            if not jobs:
+                return "No jobs in this pipeline."
+            lines = [f"Jobs in pipeline #{args['pipeline_id']}:"]
+            for j in jobs:
+                duration = f", {j.duration}s" if hasattr(j, "duration") and j.duration else ""
+                lines.append(f"  [{j.stage}] {j.name}: {j.status}{duration}")
+            return "\n".join(lines)
+
+        elif tool_name == "get_job_log":
+            job = project.jobs.get(args["job_id"])
+            trace = job.trace().decode("utf-8", errors="replace")
+            if len(trace) > 5000:
+                # Keep last 5000 chars — the end usually has the error
+                trace = "... (truncated)\n" + trace[-5000:]
+            return trace
+
+        elif tool_name == "retry_pipeline":
+            pipeline = project.pipelines.get(args["pipeline_id"])
+            pipeline.retry()
+            return f"Retried pipeline #{args['pipeline_id']}"
+
+        elif tool_name == "run_pipeline":
+            data = {"ref": args["ref"]}
+            if args.get("variables"):
+                data["variables"] = args["variables"]
+            p = project.pipelines.create(data)
+            return f"Triggered pipeline #{p.id} on {args['ref']}\nURL: {p.web_url}"
 
         elif tool_name == "list_vulnerabilities":
             kwargs = {"per_page": 20}
