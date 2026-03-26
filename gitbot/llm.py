@@ -127,8 +127,20 @@ async def tool_loop_with_model(
             tools=tools,
             api_base=settings.llm_api_base,
             api_key=settings.llm_api_key,
+            timeout=120,  # 2 min timeout per call
         )
 
+        if not response.choices:
+            log.warning("Empty choices from model (round %d)", round_num)
+            # Don't retry forever — after 3 empty responses, bail
+            empty_count = sum(1 for a in actions_taken if a.get("tool") == "_empty_response")
+            actions_taken.append({"tool": "_empty_response", "args": {}, "result": ""})
+            if empty_count >= 2:
+                log.error("Model returning empty choices repeatedly, aborting tool loop")
+                actions_taken.append({"tool": "_text_response", "args": {},
+                                      "result": "I encountered issues with the AI model. Some steps may not have completed."})
+                break
+            continue
         choice = response.choices[0]
         message = choice.message
 
