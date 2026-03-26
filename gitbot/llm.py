@@ -4,6 +4,7 @@ Supports both simple completions and tool-use agentic loops.
 """
 
 import asyncio
+import json
 import logging
 import shutil
 
@@ -73,13 +74,29 @@ async def tool_loop(
     tools: list[dict],
     execute_fn,
 ) -> list[dict]:
-    """Run an agentic tool-use loop.
+    """Run a tool-use loop using the model resolved from the task tier."""
+    family = settings.llm_family
+    model = resolve_model(family, task, settings.tier_overrides())
+    return await tool_loop_with_model(
+        model=model, system=system, prompt=prompt, tools=tools, execute_fn=execute_fn,
+    )
+
+
+async def tool_loop_with_model(
+    *,
+    model: str,
+    system: str,
+    prompt: str,
+    tools: list[dict],
+    execute_fn,
+) -> list[dict]:
+    """Run an agentic tool-use loop with an explicit model.
 
     Sends tools to the LLM, executes tool_calls, feeds results back,
     repeats until the model stops calling tools (sends a text response).
 
     Args:
-        task: Task type (determines which model tier to use)
+        model: litellm model string (e.g. "anthropic/claude-haiku-4-5-20251001")
         system: System prompt
         prompt: Initial user prompt
         tools: Tool schemas (litellm/OpenAI format)
@@ -88,13 +105,10 @@ async def tool_loop(
     Returns:
         List of actions taken: [{"tool": name, "args": {...}, "result": str}, ...]
     """
-    family = settings.llm_family
-    model = resolve_model(family, task, settings.tier_overrides())
+    log.info("Tool loop start: model=%s tools=%d", model, len(tools))
 
-    log.info("Tool loop start: task=%s model=%s tools=%d", task, model, len(tools))
-
-    if family == Family.CLAUDE_CODE:
-        # Claude Code CLI doesn't support tool_use — fall back to simple completion
+    # Claude Code CLI doesn't support tool_use
+    if settings.llm_family == Family.CLAUDE_CODE:
         log.warning("Claude Code backend doesn't support tool calling, using simple completion")
         result = await _claude_code_complete(system, prompt)
         return [{"tool": "_text_response", "args": {}, "result": result}]
@@ -105,7 +119,6 @@ async def tool_loop(
     messages.append({"role": "user", "content": prompt})
 
     actions_taken = []
-    final_text = None
 
     for round_num in range(1, MAX_TOOL_ROUNDS + 1):
         response = await litellm.acompletion(
@@ -119,26 +132,21 @@ async def tool_loop(
         choice = response.choices[0]
         message = choice.message
 
-        # Append the assistant message to conversation
         messages.append(message.model_dump(exclude_none=True))
 
-        # Check if the model wants to call tools
         if message.tool_calls:
             for tool_call in message.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = tool_call.function.arguments
                 if isinstance(fn_args, str):
-                    import json
                     fn_args = json.loads(fn_args)
 
                 log.info("Tool call [round %d]: %s(%s)",
                          round_num, fn_name, {k: str(v)[:60] for k, v in fn_args.items()})
 
-                # Execute
                 result = execute_fn(fn_name, fn_args)
                 actions_taken.append({"tool": fn_name, "args": fn_args, "result": result})
 
-                # Feed result back to the model
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -146,13 +154,10 @@ async def tool_loop(
                 })
 
         elif message.content:
-            # Model sent a text response — it's done
-            final_text = message.content
-            actions_taken.append({"tool": "_text_response", "args": {}, "result": final_text})
+            actions_taken.append({"tool": "_text_response", "args": {}, "result": message.content})
             break
 
         else:
-            # No tools and no text — done
             break
 
         if choice.finish_reason == "stop":
