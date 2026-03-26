@@ -1,28 +1,18 @@
-"""Route incoming GitLab webhook events to the right handler."""
+"""Route incoming GitLab webhook events through the brain.
+
+The router is now thin: build context → call brain → done.
+All decision-making lives in brain.py.
+"""
 
 import logging
 
-from gitbot.config import settings
-from gitbot import handlers, locks, state, gitlab_client as glc
+from gitbot import locks
+from gitbot.context import build_situation
 
 log = logging.getLogger(__name__)
 
 
-def _is_self_triggered(payload: dict) -> bool:
-    """Check if this event was triggered by the bot itself."""
-    bot = settings.bot_username
-    # Note events have the author in object_attributes
-    author = payload.get("object_attributes", {}).get("author", {})
-    if author.get("username") == bot:
-        return True
-    # Some events put the user at top level
-    user = payload.get("user", {})
-    if user.get("username") == bot:
-        return True
-    return False
-
-
-def _extract_target(event_type: str, payload: dict) -> tuple[int, str, int] | None:
+def _extract_lock_key(event_type: str, payload: dict) -> tuple[int, str, int] | None:
     """Extract (project_id, target_type, target_iid) for locking."""
     project_id = payload.get("project", {}).get("id")
     if not project_id:
@@ -47,89 +37,21 @@ def _extract_target(event_type: str, payload: dict) -> tuple[int, str, int] | No
 
 
 async def route_event(event_type: str, payload: dict) -> None:
-    """Determine what happened and dispatch to the appropriate handler."""
-    bot = settings.bot_username
+    """Build situation, acquire lock, let the brain decide."""
+    # Build full context
+    sit = build_situation(event_type, payload)
 
-    if _is_self_triggered(payload):
-        log.info("Ignoring self-triggered event: %s", event_type)
-        return
-
-    # Acquire per-target lock so concurrent events for the same issue/MR
-    # are serialized (e.g. assignment + mention arriving close together)
-    target = _extract_target(event_type, payload)
+    # Acquire per-target lock
+    lock_key = _extract_lock_key(event_type, payload)
     lock = None
-    if target:
-        lock = await locks.acquire(*target)
-        log.debug("Acquired lock for %s", target)
+    if lock_key:
+        lock = await locks.acquire(*lock_key)
 
     try:
-        await _dispatch(event_type, payload, bot)
+        # Import here to avoid circular imports
+        from gitbot.brain import decide_and_act
+        await decide_and_act(sit)
     finally:
         if lock:
             lock.release()
             locks.cleanup()
-
-
-async def _dispatch(event_type: str, payload: dict, bot: str) -> None:
-    """Route to the correct handler."""
-    if event_type == "Issue Hook":
-        action = payload.get("object_attributes", {}).get("action")
-        assignees = payload.get("assignees", [])
-        bot_assigned = any(a.get("username") == bot for a in assignees)
-        if action in ("open", "update") and bot_assigned:
-            await handlers.handle_issue_assigned(payload)
-            return
-
-    elif event_type == "Merge Request Hook":
-        attrs = payload.get("object_attributes", {})
-        action = attrs.get("action")
-        assignees = payload.get("assignees", [])
-        reviewers = payload.get("reviewers", [])
-        bot_is_assignee = any(a.get("username") == bot for a in assignees)
-        bot_is_reviewer = any(r.get("username") == bot for r in reviewers)
-
-        # Check if the bot authored this MR — skip self-assignment but still
-        # allow review requests (someone else asking the bot to review its own MR)
-        mr_author = attrs.get("author", {}).get("username") or payload.get("user", {}).get("username")
-        bot_is_author = (mr_author == bot)
-        if bot_is_author and bot_is_assignee and not bot_is_reviewer:
-            log.debug("Ignoring assignment on bot-authored MR !%s", attrs.get("iid"))
-            return
-
-        if bot_is_reviewer:
-            await handlers.handle_mr_review_requested(payload)
-            return
-        if bot_is_assignee and action in ("open", "update"):
-            await handlers.handle_mr_assigned(payload)
-            return
-
-    elif event_type == "Note Hook":
-        note_body = payload.get("object_attributes", {}).get("note", "")
-
-        # Check if this is a reply from the user we asked a question to
-        note_target = _extract_target(event_type, payload)
-        note_author = payload.get("object_attributes", {}).get("author", {}).get("username")
-        if note_target and note_author:
-            pending = state.get_pending_question(*note_target)
-            if pending and note_author == pending.get("asked_user"):
-                log.info("Reply from %s on target with pending question — treating as follow-up", note_author)
-                await handlers.handle_mention(payload)
-                return
-
-        if f"@{bot}" in note_body:
-            await handlers.handle_mention(payload)
-            return
-
-        # Comments on MRs where bot is assigned — treat as change requests
-        if note_target and note_target[1] == "MergeRequest":
-            mr_iid = payload.get("merge_request", {}).get("iid", note_target[2])
-            try:
-                mr_details = glc.get_mr_details(note_target[0], mr_iid)
-                if bot in mr_details.get("assignees", []):
-                    log.info("Comment on bot-assigned MR !%s — treating as change request", mr_iid)
-                    await handlers.handle_mr_change_request(payload)
-                    return
-            except Exception:
-                pass
-
-    log.debug("Ignoring event: %s (action=%s)", event_type, payload.get("object_attributes", {}).get("action"))
