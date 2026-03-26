@@ -58,10 +58,11 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_issue",
-            "description": "Create a new issue in the current project.",
+            "description": "Create a new issue in a project. Defaults to the current project if project_id is omitted.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "project_id": {"type": "integer", "description": "Target project ID. Omit to use the current project."},
                     "title": {"type": "string"},
                     "description": {"type": "string", "description": "Issue description (markdown)"},
                     "labels": {"type": "string", "description": "Comma-separated label names"},
@@ -237,7 +238,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_milestone",
-            "description": "Create a project milestone.",
+            "description": "Create a milestone. Can be project-level (default) or group-level if group_path is provided.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -245,6 +246,7 @@ TOOL_SCHEMAS = [
                     "description": {"type": "string"},
                     "due_date": {"type": "string", "description": "YYYY-MM-DD"},
                     "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "group_path": {"type": "string", "description": "Create as a group milestone instead of project milestone"},
                 },
                 "required": ["title"],
             },
@@ -619,6 +621,25 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# Inject optional project_id into all project-scoped tools
+_PROJECT_SCOPED = {
+    "create_issue", "update_issue", "search_issues", "link_issues",
+    "create_branch", "commit_files", "read_file", "list_files",
+    "create_merge_request", "get_mr_diff", "create_milestone", "list_milestones",
+    "assign_milestone", "assign_iteration", "create_label", "create_wiki_page",
+    "list_pipelines", "get_pipeline", "list_pipeline_jobs", "get_job_log",
+    "retry_pipeline", "run_pipeline", "list_vulnerabilities",
+}
+
+_PID_PROP = {"type": "integer", "description": "Target project ID. Omit to use the current project."}
+
+for _tool in TOOL_SCHEMAS:
+    _name = _tool["function"]["name"]
+    if _name in _PROJECT_SCOPED:
+        props = _tool["function"]["parameters"].get("properties", {})
+        if "project_id" not in props:
+            props["project_id"] = _PID_PROP
+
 
 # ---------------------------------------------------------------------------
 # Tool executor — maps tool calls to GitLab API
@@ -626,11 +647,14 @@ TOOL_SCHEMAS = [
 
 def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
     """Execute a tool call and return the result as a string for the LLM."""
-    log.info("Executing tool: %s(%s)", tool_name, {k: str(v)[:80] for k, v in args.items()})
+    # Allow tools to specify a different project
+    effective_pid = args.pop("project_id", None) or project_id
+    log.info("Executing tool: %s (project=%s) %s", tool_name, effective_pid,
+             {k: str(v)[:60] for k, v in args.items()})
 
     try:
         gl = glc.get_client()
-        project = gl.projects.get(project_id)
+        project = gl.projects.get(effective_pid)
 
         if tool_name == "post_comment":
             # Caller handles this — return instruction
@@ -658,7 +682,7 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
                 if users:
                     issue.assignee_ids = [users[0].id]
                     issue.save()
-            return f"Created issue #{issue.iid}: {issue.title}\nURL: {issue.web_url}"
+            return f"Created issue #{issue.iid} (global_id={issue.id}, project_id={effective_pid}): {issue.title}\nURL: {issue.web_url}"
 
         elif tool_name == "update_issue":
             issue = project.issues.get(args["issue_iid"])
@@ -767,8 +791,13 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
             for field in ["description", "due_date", "start_date"]:
                 if args.get(field):
                     data[field] = args[field]
-            ms = project.milestones.create(data)
-            return f"Created milestone: {ms.title} (id={ms.id})"
+            if args.get("group_path"):
+                group = gl.groups.get(args["group_path"])
+                ms = group.milestones.create(data)
+                return f"Created group milestone: {ms.title} (id={ms.id})"
+            else:
+                ms = project.milestones.create(data)
+                return f"Created project milestone: {ms.title} (id={ms.id})"
 
         elif tool_name == "create_label":
             data = {"name": args["name"], "color": args.get("color", "#428BCA")}
@@ -924,7 +953,7 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
                 if args.get(field) is not None:
                     data[field] = args[field]
             new_project = gl.projects.create(data)
-            return f"Created project: {new_project.path_with_namespace}\nURL: {new_project.web_url}"
+            return f"Created project: {new_project.path_with_namespace} (id={new_project.id})\nURL: {new_project.web_url}"
 
         elif tool_name == "get_project_info":
             p = gl.projects.get(args["project_id_or_path"])
@@ -943,7 +972,7 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
                 if args.get(field) is not None:
                     data[field] = args[field]
             group = gl.groups.create(data)
-            return f"Created group: {group.full_path}\nURL: {group.web_url}"
+            return f"Created group: {group.full_path} (id={group.id})\nURL: {group.web_url}"
 
         elif tool_name == "list_groups":
             kwargs = {"per_page": 20}
