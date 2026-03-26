@@ -13,7 +13,7 @@ from functools import partial
 from gitbot import llm, gitlab_client as glc, state
 from gitbot.config import settings
 from gitbot.context import Situation, fetch_source, MAX_ROUNDS
-from gitbot.models import Task, Tier, Family, resolve_model
+from gitbot.models import Task, Tier, resolve_model
 from gitbot.tools import TOOL_SCHEMAS, execute_tool
 
 log = logging.getLogger(__name__)
@@ -265,7 +265,7 @@ async def _make_plan(sit: Situation, summary: str) -> dict | None:
         summary=summary,
     )
 
-    raw = await llm.complete(Task.TRIAGE, system=PLAN_SYSTEM, prompt=prompt)
+    raw = await llm.complete(Task.PLAN, system=PLAN_SYSTEM, prompt=prompt)
 
     try:
         plan = _parse_json(raw)
