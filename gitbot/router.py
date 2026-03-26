@@ -7,7 +7,7 @@ All decision-making lives in brain.py.
 import logging
 
 from gitbot import locks
-from gitbot.context import build_situation
+from gitbot.context import build_minimal
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +38,8 @@ def _extract_lock_key(event_type: str, payload: dict) -> tuple[int, str, int] | 
 
 async def route_event(event_type: str, payload: dict) -> None:
     """Build situation, acquire lock, let the brain decide."""
-    # Build full context
-    sit = build_situation(event_type, payload)
+    # Build minimal context (no API calls)
+    sit = build_minimal(event_type, payload)
 
     # Acquire per-target lock
     lock_key = _extract_lock_key(event_type, payload)
