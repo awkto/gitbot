@@ -8,15 +8,33 @@ from gitbot import handlers
 log = logging.getLogger(__name__)
 
 
+def _is_self_triggered(payload: dict) -> bool:
+    """Check if this event was triggered by the bot itself."""
+    bot = settings.bot_username
+    # Note events have the author in object_attributes
+    author = payload.get("object_attributes", {}).get("author", {})
+    if author.get("username") == bot:
+        return True
+    # Some events put the user at top level
+    user = payload.get("user", {})
+    if user.get("username") == bot:
+        return True
+    return False
+
+
 async def route_event(event_type: str, payload: dict) -> None:
     """Determine what happened and dispatch to the appropriate handler."""
     bot = settings.bot_username
+
+    if _is_self_triggered(payload):
+        log.info("Ignoring self-triggered event: %s", event_type)
+        return
 
     if event_type == "Issue Hook":
         action = payload.get("object_attributes", {}).get("action")
         assignees = payload.get("assignees", [])
         bot_assigned = any(a.get("username") == bot for a in assignees)
-        if action == "update" and bot_assigned:
+        if action in ("open", "update") and bot_assigned:
             await handlers.handle_issue_assigned(payload)
             return
 
