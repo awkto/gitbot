@@ -67,7 +67,7 @@ TASK_TIERS: dict[Task, Tier] = {
     Task.MR_SUMMARY: Tier.MID,
     Task.MENTION_RESPONSE: Tier.MID,
     Task.CODE_REVIEW: Tier.STRONG,
-    Task.IMPLEMENT: Tier.STRONG,
+    Task.IMPLEMENT: Tier.MID,
     Task.TRIAGE: Tier.MID,
 }
 
