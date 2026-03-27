@@ -114,31 +114,23 @@ Respond with JSON:
 STEP_SYSTEM = """\
 You are GitBot, executing a specific step of a larger plan.
 
-Project: "{project_name}" (ID: {project_id})
+Originating project: "{project_name}" (ID: {project_id})
 
-Full context:
-{situation}
-
-Overall plan:
-{plan_summary}
-
-Results from previous steps:
-{previous_results}
+{id_registry}
 
 Your current step: {step_description}
 
-IMPORTANT: Use IDs returned by previous steps (project IDs, group IDs,
-milestone IDs, etc.) — do NOT guess or make up IDs. If a previous step
-created a project with id=39, use project_id=39 when creating issues in it.
+CRITICAL: When a tool needs a project_id, milestone_id, epic_iid, or
+iteration_id, you MUST use the exact IDs from the registry above.
+NEVER guess or invent IDs. If an ID you need is not in the registry,
+say so — do not make one up.
 
-Use the tools to complete THIS STEP ONLY. When done with this step,
-send a short text summary of what you accomplished, including any IDs
-created so future steps can reference them.
+When done, list any NEW IDs you created in this format:
+CREATED: type name = id
 
 Tips:
 - Call multiple tools in parallel when operations are independent
-- If something fails, note it and move on
-- Be efficient — don't overthink simple operations"""
+- If something fails, note it and move on"""
 
 
 async def decide_and_act(sit: Situation) -> None:
@@ -164,7 +156,7 @@ async def decide_and_act(sit: Situation) -> None:
         if sit.target_type == "Issue":
             glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
 
-        result = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS, "")
+        result = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS)
         _update_placeholder(sit, placeholder_id, result)
         _clear_labels(sit)
     else:
@@ -180,21 +172,18 @@ async def decide_and_act(sit: Situation) -> None:
             glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
 
         step_results = []
-        accumulated_results = ""  # pass to each step so it knows what happened before
+        id_registry = {}  # {"project customer-portal": 66, "milestone Phase 1": 82}
         for i, step in enumerate(plan["steps"]):
             tier = Tier(step.get("tier", "cheap"))
             desc = step.get("description", f"Step {i+1}")
             log.info("Executing step %d/%d [%s]: %s",
                      i + 1, len(plan["steps"]), tier, desc[:80])
 
-            result = await _execute_step(sit, desc, tier, TOOL_SCHEMAS, accumulated_results)
+            result = await _execute_step(sit, desc, tier, TOOL_SCHEMAS, id_registry)
             step_results.append(f"**Step {i+1}**: {desc}\n{result}")
 
-            # Accumulate results for next steps (keep it concise)
-            accumulated_results += f"\n\nStep {i+1} ({desc}): {result}"
-            # Cap accumulated results to avoid blowing up context
-            if len(accumulated_results) > 6000:
-                accumulated_results = accumulated_results[-6000:]
+            # Parse any new IDs from the result
+            _extract_ids_from_result(result, id_registry)
 
             # Update checklist — mark step as done
             if checklist:
@@ -288,7 +277,7 @@ async def _make_plan(sit: Situation, summary: str) -> dict | None:
     return plan
 
 
-async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools: list[dict], previous_results: str = "") -> str:
+async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools: list[dict], id_registry: dict | None = None) -> str:
     """Phase 3: Execute a single step with the appropriate model."""
     family = settings.llm_family
     overrides = settings.tier_overrides()
@@ -299,13 +288,20 @@ async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools
 
     log.info("Executing step [%s] with model %s: %s", tier, model_str, step_description[:80])
 
+    # Format ID registry as a clean reference table
+    if id_registry:
+        registry_lines = ["## Resource IDs (use these EXACT values in tool calls):"]
+        for name, rid in id_registry.items():
+            registry_lines.append(f"  {name} = {rid}")
+        registry_str = "\n".join(registry_lines)
+    else:
+        registry_str = "## Resource IDs: (none yet — this is the first step)"
+
     system = STEP_SYSTEM.format(
         project_name=sit.project_name,
         project_id=sit.project_id,
-        situation=sit.to_prompt(),
-        plan_summary=step_description,
+        id_registry=registry_str,
         step_description=step_description,
-        previous_results=previous_results if previous_results else "(this is the first step)",
     )
 
     if sit.comment_body:
@@ -378,6 +374,39 @@ def _summarize_actions(actions: list[dict], comments_posted: list[str]) -> str:
     if final:
         return f"{final}\n\n**Actions and IDs:**\n{summary_text}"
     return f"**Actions and IDs:**\n{summary_text}"
+
+
+def _extract_ids_from_result(result: str, registry: dict) -> None:
+    """Parse tool result text and extract IDs into the registry."""
+
+    # Pattern: Created <type>: <path/name> (id=<num>)
+    for m in re.finditer(r"Created (\w[\w\s]*?):\s*(.+?)\s*\(id=(\d+)\)", result):
+        rtype = m.group(1).strip().lower()
+        name = m.group(2).strip().split("/")[-1]  # last path component
+        registry[f"{rtype} {name}"] = int(m.group(3))
+
+    # Pattern: Created group milestone: <name> (id=<num>)
+    for m in re.finditer(r"Created (\w+ milestone):\s*(.+?)\s*\(id=(\d+)\)", result):
+        registry[f"{m.group(1).lower()} {m.group(2).strip()}"] = int(m.group(3))
+
+    # Pattern: Created issue #<iid> (global_id=<num>, project_id=<num>)
+    for m in re.finditer(r"Created issue #(\d+) \(global_id=(\d+), project_id=(\d+)\)", result):
+        registry[f"issue #{m.group(1)} in project {m.group(3)} global_id"] = int(m.group(2))
+
+    # Pattern: Created epic &<iid>: <title>
+    for m in re.finditer(r"Created epic &(\d+):\s*(.+?)(?:\n|$)", result):
+        registry[f"epic {m.group(2).strip()}"] = int(m.group(1))
+
+    # Pattern: Created iteration cadence/iteration: <name> (id=<gid>)
+    for m in re.finditer(r"Created iteration(?:\s+cadence)?:\s*(.+?)\s*\(id=([^,)]+)", result):
+        registry[f"iteration {m.group(1).strip()}"] = m.group(2)
+
+    # Pattern: CREATED: <type> <name> = <id> (model's own output format)
+    for m in re.finditer(r"CREATED:\s*(\w+)\s+(.+?)\s*=\s*(\d+)", result):
+        registry[f"{m.group(1).lower()} {m.group(2).strip()}"] = int(m.group(3))
+
+    if registry:
+        log.debug("ID registry now has %d entries", len(registry))
 
 
 # ---------------------------------------------------------------------------
