@@ -71,33 +71,44 @@ PLAN_PROMPT = """\
 <task_summary>{summary}</task_summary>
 
 <instructions>
-Break this task into execution steps. For each step, assign a model tier:
+Break this task into execution steps. Each step is executed by a separate
+model instance that can only see the ID registry (not previous conversations).
 
-- **"cheap"** — Simple self-contained operations that do NOT reference IDs
-  or outputs from other steps. Examples: creating a branch, posting a comment,
-  acknowledging a task, creating a single item with hardcoded values.
-  ONLY use cheap when the step is completely independent.
+CRITICAL PLANNING RULES:
 
-- **"mid"** — Use for MOST steps. This includes:
-  - Any step that references IDs from previous steps (project IDs, milestone IDs,
-    epic IDs, etc.)
-  - Creating issues, epics, or milestones with descriptive content
-  - Assigning milestones/epics/iterations to issues
-  - Code generation, writing files, CI/CD configs
-  - Any step where accuracy matters
+1. **Make steps atomic and concrete.** Don't say "assign milestones to all 30 issues."
+   Instead, break it down: "Assign milestone X to issues #1-#10 in project A",
+   "Assign milestone Y to issues #1-#10 in project B", etc. Each step should be
+   a small, clear batch that a simple model can follow without complex reasoning.
 
-- **"strong"** — Only for tasks requiring deep reasoning: complex architecture
-  decisions, subtle security analysis, thorough code review. Rare.
+2. **Include explicit values in step descriptions.** Don't say "distribute epics
+   across issues." Say "Assign epic 'Supply Chain' to issues #1,#2,#3 in project
+   customer-portal, epic 'Factory Ops' to issues #4,#5,#6..." The executing model
+   will have the ID registry with real IDs, but the descriptions should spell out
+   the mapping.
 
-IMPORTANT: If a step needs to use IDs created in earlier steps (e.g. "assign
-milestones to issues" needs milestone IDs from a previous step), it MUST be
-"mid" not "cheap". Cheap models are unreliable at cross-referencing IDs.
+3. **One concern per step.** Don't combine "create issues AND assign milestones."
+   Split: step A creates issues, step B assigns milestones to those issues.
+
+4. **Creation before assignment.** Always create resources (projects, milestones,
+   epics) in earlier steps before steps that assign them to other resources.
+
+MODEL TIERS:
+
+- **"cheap"** — ONLY for self-contained operations with no cross-referencing:
+  post a comment, create a single branch, acknowledge the task.
+
+- **"mid"** — Default for most work: creating resources, writing code,
+  assignments, anything that references the ID registry.
+
+- **"strong"** — Deep reasoning: architecture, security review, debugging
+  failures. Rare.
 
 Respond with JSON:
 {{
   "steps": [
     {{
-      "description": "What to do in this step",
+      "description": "Concrete, explicit description of what to do",
       "tier": "cheap" | "mid" | "strong",
       "tools_needed": ["tool1", "tool2"]
     }}
@@ -179,7 +190,9 @@ async def decide_and_act(sit: Situation) -> None:
             log.info("Executing step %d/%d [%s]: %s",
                      i + 1, len(plan["steps"]), tier, desc[:80])
 
-            result = await _execute_step(sit, desc, tier, TOOL_SCHEMAS, id_registry)
+            result = await _execute_step_with_escalation(
+                sit, desc, tier, TOOL_SCHEMAS, id_registry, i + 1, len(plan["steps"]),
+            )
             step_results.append(f"**Step {i+1}**: {desc}\n{result}")
 
             # Parse any new IDs from the result
@@ -275,6 +288,67 @@ async def _make_plan(sit: Situation, summary: str) -> dict | None:
         log.info("  Plan step %d [%s]: %s", i + 1, step.get("tier", "?"), step.get("description", "?")[:80])
 
     return plan
+
+
+_TIER_ESCALATION = {Tier.CHEAP: Tier.MID, Tier.MID: Tier.STRONG}
+
+
+async def _execute_step_with_escalation(
+    sit: Situation, step_description: str, tier: Tier, tools: list[dict],
+    id_registry: dict | None, step_num: int, total_steps: int,
+) -> str:
+    """Execute a step, escalating to a stronger model if it fails."""
+    result = await _execute_step(sit, step_description, tier, tools, id_registry)
+
+    # Check if the step actually accomplished something
+    if _step_looks_failed(result):
+        next_tier = _TIER_ESCALATION.get(tier)
+        if next_tier:
+            log.warning(
+                "Step %d/%d failed on %s — escalating to %s",
+                step_num, total_steps, tier, next_tier,
+            )
+            result = await _execute_step(
+                sit,
+                f"{step_description}\n\nPREVIOUS ATTEMPT FAILED. The weaker model returned:\n{result[:500]}\n\nPlease complete this step properly.",
+                next_tier, tools, id_registry,
+            )
+
+            # If still failed on strong, give up gracefully
+            if _step_looks_failed(result) and next_tier == Tier.STRONG:
+                log.error("Step %d/%d failed even on strong tier", step_num, total_steps)
+
+    return result
+
+
+def _step_looks_failed(result: str) -> bool:
+    """Check tool results (ground truth) for failure, not the model's summary."""
+    if not result or result == "*(no actions taken)*" or result == "*(completed)*":
+        return True
+
+    # Count actual tool successes vs failures in the result
+    success_markers = ["Created ", "Committed ", "Updated ", "Assigned ", "Linked ", "Pushed ", "Triggered "]
+    fail_markers = ["Error:", "404 Not Found", "403 Forbidden", "could not", "not found"]
+    model_gave_up = [
+        "does not include", "not available", "tool availability",
+        "manual creation", "cannot be done", "limited by tool",
+        "I encountered issues", "unable to complete",
+    ]
+
+    lower = result.lower()
+    successes = sum(1 for m in success_markers if m.lower() in lower)
+    failures = sum(1 for m in fail_markers if m.lower() in lower)
+    gave_up = any(m in lower for m in model_gave_up)
+
+    # Failed if: model gave up, or zero successes, or mostly errors
+    if gave_up:
+        return True
+    if successes == 0:
+        return True
+    if failures > successes:
+        return True
+
+    return False
 
 
 async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools: list[dict], id_registry: dict | None = None) -> str:
