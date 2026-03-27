@@ -1,0 +1,25 @@
+services:
+  gitbot:
+    build: .
+    ports:
+      - "8042:8042"
+    environment:
+      # GitLab
+      - GITBOT_GITLAB_URL=${GITBOT_GITLAB_URL}
+      - GITBOT_GITLAB_TOKEN=${GITBOT_GITLAB_TOKEN}
+      - GITBOT_BOT_USERNAME=${GITBOT_BOT_USERNAME:-gitbot}
+      - GITBOT_GITLAB_SSL_VERIFY=${GITBOT_GITLAB_SSL_VERIFY:-true}
+      - GITBOT_WEBHOOK_SECRET=${GITBOT_WEBHOOK_SECRET:-}
+      # LLM
+      - GITBOT_LLM_FAMILY=${GITBOT_LLM_FAMILY:-anthropic}
+      - GITBOT_LLM_API_KEY=${GITBOT_LLM_API_KEY}
+      - GITBOT_LLM_API_BASE=${GITBOT_LLM_API_BASE:-}
+      - GITBOT_LLM_MODEL_CHEAP=${GITBOT_LLM_MODEL_CHEAP:-}
+      - GITBOT_LLM_MODEL_MID=${GITBOT_LLM_MODEL_MID:-}
+      - GITBOT_LLM_MODEL_STRONG=${GITBOT_LLM_MODEL_STRONG:-}
+    volumes:
+      - gitbot-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  gitbot-data:
