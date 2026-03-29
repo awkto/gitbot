@@ -66,7 +66,13 @@ def get_tools_for_step(tools_needed: list[str] | None) -> list[dict]:
     allowed_tools.update(TOOL_CATEGORIES["comments"])
 
     filtered = [t for t in TOOL_SCHEMAS if t["function"]["name"] in allowed_tools]
-    return filtered if filtered else TOOL_SCHEMAS
+    # If we only matched the always-included comments, the plan's tool names
+    # didn't match anything real — fall back to all tools
+    comment_names = set(TOOL_CATEGORIES["comments"])
+    matched_non_comment = any(
+        t["function"]["name"] not in comment_names for t in filtered
+    )
+    return filtered if matched_non_comment else TOOL_SCHEMAS
 
 
 # ---------------------------------------------------------------------------
