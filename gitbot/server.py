@@ -1,14 +1,17 @@
-"""FastAPI webhook server."""
+"""FastAPI webhook server + admin panel."""
 
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from gitbot.config import settings
 from gitbot.router import route_event
 from gitbot.todos import process_pending_todos
+from gitbot.activity import tracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -16,7 +19,6 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # On startup: process any pending todos from before crash/restart
     log.info("Checking for pending todos (crash recovery)...")
     try:
         await process_pending_todos()
@@ -25,12 +27,16 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GitBot", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="GitBot", version="0.9.0", lifespan=lifespan)
 
+
+# ---------------------------------------------------------------------------
+# Webhook endpoint
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "admin": settings.admin_enabled}
 
 
 @app.post("/webhook")
@@ -39,13 +45,13 @@ async def webhook(
     x_gitlab_event: str = Header(...),
     x_gitlab_token: str | None = Header(None),
 ):
-    # Verify webhook secret if configured
     if settings.webhook_secret:
         if x_gitlab_token != settings.webhook_secret:
             raise HTTPException(status_code=403, detail="Invalid webhook token")
 
     payload = await request.json()
     log.info("Received event: %s", x_gitlab_event)
+    tracker.webhook_received()
 
     async def _safe_route(event_type, payload):
         try:
@@ -56,3 +62,75 @@ async def webhook(
     asyncio.create_task(_safe_route(x_gitlab_event, payload))
 
     return {"status": "accepted"}
+
+
+# ---------------------------------------------------------------------------
+# Admin panel
+# ---------------------------------------------------------------------------
+
+def _check_admin():
+    if not settings.admin_enabled:
+        raise HTTPException(status_code=404)
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page():
+    _check_admin()
+    html_path = Path(__file__).parent / "admin.html"
+    return HTMLResponse(html_path.read_text())
+
+
+@app.get("/admin/api/stats")
+async def admin_stats():
+    _check_admin()
+    stats = tracker.get_stats()
+    stats["config"] = {
+        "gitlab_url": settings.gitlab_url,
+        "bot_username": settings.bot_username,
+        "llm_family": settings.llm_family,
+        "gitlab_connected": bool(settings.gitlab_token),
+        "llm_configured": bool(settings.llm_api_key or settings.llm_family == "claude-code"),
+    }
+    return stats
+
+
+@app.get("/admin/api/events")
+async def admin_events(limit: int = 50):
+    _check_admin()
+    return tracker.get_events(limit)
+
+
+@app.get("/admin/api/workflows")
+async def admin_workflows(limit: int = 20):
+    _check_admin()
+    return tracker.get_workflows(limit)
+
+
+@app.get("/admin/api/current")
+async def admin_current():
+    _check_admin()
+    return tracker.get_current()
+
+
+@app.post("/admin/api/test-gitlab")
+async def admin_test_gitlab():
+    _check_admin()
+    try:
+        from gitbot import gitlab_client as glc
+        gl = glc.get_client()
+        user = gl.auth()
+        return {"status": "ok", "user": gl.user.username, "url": settings.gitlab_url}
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
+
+
+@app.post("/admin/api/test-llm")
+async def admin_test_llm():
+    _check_admin()
+    try:
+        from gitbot import llm
+        from gitbot.models import Task
+        result = await llm.complete(Task.TRIAGE, system="Say OK", prompt="Test")
+        return {"status": "ok", "model": settings.llm_family, "response": result[:100]}
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=400)

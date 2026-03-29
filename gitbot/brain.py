@@ -11,6 +11,9 @@ import re
 from functools import partial
 
 from gitbot import llm, gitlab_client as glc, state
+import uuid
+
+from gitbot.activity import tracker
 from gitbot.config import settings
 from gitbot.context import Situation, fetch_source, MAX_ROUNDS
 from gitbot.models import Task, Tier, resolve_model
@@ -147,73 +150,98 @@ Tips:
 async def decide_and_act(sit: Situation) -> None:
     """Main entry: gather → plan → execute."""
     if _should_skip(sit):
+        tracker.webhook_skipped()
         return
+
+    wf_id = str(uuid.uuid4())[:8]
+    target_str = f"{sit.target_type} #{sit.target_iid}"
+    wf = tracker.start_workflow(wf_id, sit.trigger, target_str, sit.project_name)
+    tracker.log("info", f"Started: {target_str} ({sit.trigger})", wf_id)
 
     placeholder_id = _post_placeholder(sit)
 
-    # Phase 1: Gather context (Haiku)
-    summary = await _gather_context(sit)
-    if summary is None:
-        _remove_placeholder(sit, placeholder_id)
-        return
+    try:
+        # Phase 1: Gather context (Haiku)
+        tracker.log("info", "Gathering context...", wf_id)
+        summary = await _gather_context(sit)
+        if summary is None:
+            _remove_placeholder(sit, placeholder_id)
+            tracker.log("info", "Skipped — not relevant", wf_id)
+            tracker.finish_workflow(wf_id, "completed")
+            return
 
-    # Phase 2: Plan (Sonnet) — break into steps with model tiers
-    plan = await _make_plan(sit, summary)
+        # Phase 2: Plan (Sonnet) — break into steps with model tiers
+        tracker.log("info", "Planning...", wf_id)
+        plan = await _make_plan(sit, summary)
 
-    if not plan or not plan.get("steps"):
-        # Simple task — just execute directly with Sonnet
-        _update_placeholder(sit, placeholder_id,
-                            ":hammer_and_wrench: **Working on it...**")
-        if sit.target_type == "Issue":
-            glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
-
-        result = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS)
-        _update_placeholder(sit, placeholder_id, result)
-        _clear_labels(sit)
-    else:
-        # Multi-step plan — post checklist and execute step by step
-        checklist = plan.get("checklist_markdown", "")
-        if checklist:
-            _update_placeholder(sit, placeholder_id, checklist)
-        else:
+        if not plan or not plan.get("steps"):
             _update_placeholder(sit, placeholder_id,
-                                ":hammer_and_wrench: **Working through the plan...**")
+                                ":hammer_and_wrench: **Working on it...**")
+            if sit.target_type == "Issue":
+                glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
 
-        if sit.target_type == "Issue":
-            glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
+            tracker.set_plan(wf_id, 1)
+            result = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS)
+            tracker.step_completed(wf_id, settings.llm_family)
+            _update_placeholder(sit, placeholder_id, result)
+            _clear_labels(sit)
+        else:
+            num_steps = len(plan["steps"])
+            tracker.set_plan(wf_id, num_steps)
+            tracker.log("info", f"Plan: {num_steps} steps", wf_id)
 
-        step_results = []
-        id_registry = {}  # {"project customer-portal": 66, "milestone Phase 1": 82}
-        for i, step in enumerate(plan["steps"]):
-            tier = Tier(step.get("tier", "cheap"))
-            desc = step.get("description", f"Step {i+1}")
-            log.info("Executing step %d/%d [%s]: %s",
-                     i + 1, len(plan["steps"]), tier, desc[:80])
-
-            result = await _execute_step_with_escalation(
-                sit, desc, tier, TOOL_SCHEMAS, id_registry, i + 1, len(plan["steps"]),
-            )
-            step_results.append(f"**Step {i+1}**: {desc}\n{result}")
-
-            # Parse any new IDs from the result
-            _extract_ids_from_result(result, id_registry)
-
-            # Update checklist — mark step as done
+            checklist = plan.get("checklist_markdown", "")
             if checklist:
-                checklist = checklist.replace("- [ ]", "- [x]", 1)
                 _update_placeholder(sit, placeholder_id, checklist)
+            else:
+                _update_placeholder(sit, placeholder_id,
+                                    ":hammer_and_wrench: **Working through the plan...**")
 
-        # Final summary
-        final = "\n\n".join(step_results)
-        if len(final) > 4000:
-            final = final[:4000] + "\n\n*(truncated)*"
-        _update_placeholder(sit, placeholder_id,
-                            f":white_check_mark: **Done!**\n\n{final}")
-        _clear_labels(sit)
+            if sit.target_type == "Issue":
+                glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
 
-    # Clean up pending question if we acted
-    if sit.pending_question:
-        state.complete_work_item(sit.pending_question["id"])
+            step_results = []
+            id_registry = {}
+            for i, step in enumerate(plan["steps"]):
+                tier = Tier(step.get("tier", "cheap"))
+                desc = step.get("description", f"Step {i+1}")
+                log.info("Executing step %d/%d [%s]: %s",
+                         i + 1, num_steps, tier, desc[:80])
+                tracker.log("info", f"Step {i+1}/{num_steps} [{tier}]: {desc[:60]}", wf_id)
+
+                result = await _execute_step_with_escalation(
+                    sit, desc, tier, TOOL_SCHEMAS, id_registry, i + 1, num_steps,
+                )
+                tracker.step_completed(wf_id, tier)
+                step_results.append(f"**Step {i+1}**: {desc}\n{result}")
+
+                _extract_ids_from_result(result, id_registry)
+
+                if checklist:
+                    checklist = checklist.replace("- [ ]", "- [x]", 1)
+                    _update_placeholder(sit, placeholder_id, checklist)
+
+            # Final summary
+            final = "\n\n".join(step_results)
+            if len(final) > 4000:
+                final = final[:4000] + "\n\n*(truncated)*"
+            _update_placeholder(sit, placeholder_id,
+                                f":white_check_mark: **Done!**\n\n{final}")
+            _clear_labels(sit)
+
+        tracker.log("info", f"Completed: {target_str}", wf_id)
+        tracker.finish_workflow(wf_id, "completed")
+
+    except Exception as e:
+        log.exception("Workflow failed for %s", target_str)
+        tracker.log("error", f"Failed: {e}", wf_id)
+        tracker.finish_workflow(wf_id, "failed", str(e))
+        raise
+
+    finally:
+        # Clean up pending question if we acted
+        if sit.pending_question:
+            state.complete_work_item(sit.pending_question["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +328,6 @@ async def _execute_step_with_escalation(
     """Execute a step, escalating to a stronger model if it fails."""
     result = await _execute_step(sit, step_description, tier, tools, id_registry)
 
-    # Check if the step actually accomplished something
     if _step_looks_failed(result):
         next_tier = _TIER_ESCALATION.get(tier)
         if next_tier:
@@ -308,6 +335,8 @@ async def _execute_step_with_escalation(
                 "Step %d/%d failed on %s — escalating to %s",
                 step_num, total_steps, tier, next_tier,
             )
+            tracker.escalation(sit._wf_id if hasattr(sit, '_wf_id') else "")
+            tracker.log("warn", f"Step {step_num} failed on {tier}, escalating to {next_tier}")
             result = await _execute_step(
                 sit,
                 f"{step_description}\n\nPREVIOUS ATTEMPT FAILED. The weaker model returned:\n{result[:500]}\n\nPlease complete this step properly.",

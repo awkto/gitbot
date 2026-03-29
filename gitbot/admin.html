@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GitBot Admin</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 1rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+  h1 .dot { width: 10px; height: 10px; border-radius: 50%; background: #3fb950; display: inline-block; }
+  h1 .dot.error { background: #f85149; }
+  h2 { font-size: 1.1rem; color: #8b949e; margin: 1.5rem 0 0.5rem; border-bottom: 1px solid #21262d; padding-bottom: 0.3rem; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; }
+  .card .label { color: #8b949e; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .card .value { font-size: 1.8rem; font-weight: 600; color: #e6edf3; margin-top: 0.25rem; }
+  .card .sub { font-size: 0.75rem; color: #8b949e; margin-top: 0.25rem; }
+
+  .config-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+  .config-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.5rem 0.75rem; font-size: 0.85rem; }
+  .config-item .label { color: #8b949e; font-size: 0.7rem; }
+  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 500; }
+  .badge.ok { background: #238636; color: #fff; }
+  .badge.warn { background: #9e6a03; color: #fff; }
+  .badge.error { background: #da3633; color: #fff; }
+
+  .btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
+  .btn:hover { background: #30363d; }
+  .btn.primary { background: #238636; border-color: #2ea043; }
+
+  /* Active workflows */
+  .workflow { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.75rem; margin-bottom: 0.5rem; }
+  .workflow .header { display: flex; justify-content: space-between; align-items: center; }
+  .workflow .target { font-weight: 600; color: #e6edf3; }
+  .workflow .meta { color: #8b949e; font-size: 0.8rem; }
+  .workflow .progress { margin-top: 0.5rem; }
+  .progress-bar { background: #21262d; height: 6px; border-radius: 3px; overflow: hidden; }
+  .progress-fill { background: #238636; height: 100%; transition: width 0.3s; }
+
+  /* Event log */
+  .events { max-height: 400px; overflow-y: auto; }
+  .event { padding: 0.3rem 0.5rem; font-size: 0.8rem; font-family: monospace; border-bottom: 1px solid #21262d; }
+  .event .ts { color: #484f58; }
+  .event.warn { border-left: 3px solid #9e6a03; }
+  .event.error { border-left: 3px solid #da3633; }
+  .event.info { border-left: 3px solid #388bfd; }
+
+  /* Workflow history */
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th { text-align: left; color: #8b949e; font-weight: 500; padding: 0.5rem; border-bottom: 1px solid #30363d; }
+  td { padding: 0.5rem; border-bottom: 1px solid #21262d; }
+  tr:hover { background: #161b22; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1><span class="dot" id="statusDot"></span> GitBot Admin</h1>
+
+  <!-- Config -->
+  <div class="config-row" id="configRow"></div>
+  <div style="margin-bottom:1rem">
+    <button class="btn" onclick="testGitlab()">Test GitLab</button>
+    <button class="btn" onclick="testLlm()">Test LLM</button>
+    <span id="testResult" style="margin-left:0.5rem;font-size:0.85rem"></span>
+  </div>
+
+  <!-- Stats -->
+  <div class="grid" id="statsGrid"></div>
+
+  <!-- Active Workflows -->
+  <h2>Active Workflows</h2>
+  <div id="currentWorkflows"><span class="meta">None</span></div>
+
+  <!-- Event Log -->
+  <h2>Activity Feed <button class="btn" onclick="clearEvents()" style="float:right;font-size:0.7rem">Clear</button></h2>
+  <div class="events" id="eventLog"></div>
+
+  <!-- History -->
+  <h2>Recent Workflows</h2>
+  <table>
+    <thead><tr><th>Target</th><th>Trigger</th><th>Steps</th><th>Tools</th><th>Models</th><th>Time</th><th>Status</th></tr></thead>
+    <tbody id="workflowHistory"></tbody>
+  </table>
+</div>
+
+<script>
+const API = '/admin/api';
+let allEvents = [];
+
+function fmt(ts) {
+  return new Date(ts * 1000).toLocaleTimeString();
+}
+function dur(s) {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s/60)}m ${Math.round(s%60)}s`;
+  return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+}
+
+async function fetchStats() {
+  try {
+    const r = await fetch(`${API}/stats`);
+    const d = await r.json();
+
+    document.getElementById('statusDot').className = 'dot' + (d.config.gitlab_connected && d.config.llm_configured ? '' : ' error');
+
+    document.getElementById('configRow').innerHTML = `
+      <div class="config-item"><div class="label">GitLab</div>${d.config.gitlab_url}
+        <span class="badge ${d.config.gitlab_connected ? 'ok' : 'error'}">${d.config.gitlab_connected ? 'connected' : 'no token'}</span></div>
+      <div class="config-item"><div class="label">Bot User</div>@${d.config.bot_username}</div>
+      <div class="config-item"><div class="label">LLM</div>${d.config.llm_family}
+        <span class="badge ${d.config.llm_configured ? 'ok' : 'error'}">${d.config.llm_configured ? 'ready' : 'no key'}</span></div>
+    `;
+
+    document.getElementById('statsGrid').innerHTML = `
+      <div class="card"><div class="label">Uptime</div><div class="value">${dur(d.uptime_seconds)}</div></div>
+      <div class="card"><div class="label">Webhooks</div><div class="value">${d.webhooks_received}</div><div class="sub">${d.webhooks_skipped} skipped</div></div>
+      <div class="card"><div class="label">Workflows</div><div class="value">${d.workflows_completed}</div><div class="sub">${d.workflows_failed} failed, ${d.active_workflows} active</div></div>
+      <div class="card"><div class="label">Tool Calls</div><div class="value">${d.total_tool_calls}</div><div class="sub">${d.total_escalations} escalations</div></div>
+    `;
+  } catch(e) { console.error(e); }
+}
+
+async function fetchCurrent() {
+  try {
+    const r = await fetch(`${API}/current`);
+    const wfs = await r.json();
+    const el = document.getElementById('currentWorkflows');
+    if (!wfs.length) { el.innerHTML = '<span class="meta">No active workflows</span>'; return; }
+    el.innerHTML = wfs.map(w => {
+      const pct = w.plan_steps ? Math.round(w.completed_steps / w.plan_steps * 100) : 0;
+      return `<div class="workflow">
+        <div class="header">
+          <span class="target">${w.target}</span>
+          <span class="meta">${w.project} &middot; ${dur(w.elapsed_seconds)}</span>
+        </div>
+        <div class="meta">Step ${w.completed_steps}/${w.plan_steps} &middot; ${w.tool_calls} tools &middot; ${w.models_used.join(', ')}</div>
+        <div class="progress"><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div></div>
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function fetchEvents() {
+  try {
+    const r = await fetch(`${API}/events?limit=100`);
+    allEvents = await r.json();
+    renderEvents();
+  } catch(e) {}
+}
+
+function renderEvents() {
+  document.getElementById('eventLog').innerHTML = allEvents.map(e =>
+    `<div class="event ${e.level}"><span class="ts">${fmt(e.timestamp)}</span> ${e.message}</div>`
+  ).join('');
+}
+
+function clearEvents() { allEvents = []; renderEvents(); }
+
+async function fetchWorkflows() {
+  try {
+    const r = await fetch(`${API}/workflows?limit=20`);
+    const wfs = await r.json();
+    document.getElementById('workflowHistory').innerHTML = wfs.map(w =>
+      `<tr>
+        <td>${w.target}</td>
+        <td>${w.trigger}</td>
+        <td>${w.completed_steps}/${w.plan_steps}</td>
+        <td>${w.tool_calls}</td>
+        <td>${w.models_used.join(', ') || '-'}</td>
+        <td>${dur(w.elapsed_seconds)}</td>
+        <td><span class="badge ${w.status === 'completed' ? 'ok' : w.status === 'running' ? 'warn' : 'error'}">${w.status}</span></td>
+      </tr>`
+    ).join('');
+  } catch(e) {}
+}
+
+async function testGitlab() {
+  const el = document.getElementById('testResult');
+  el.textContent = 'Testing...';
+  try {
+    const r = await fetch(`${API}/test-gitlab`, {method:'POST'});
+    const d = await r.json();
+    el.innerHTML = d.status === 'ok'
+      ? `<span class="badge ok">GitLab OK: @${d.user}</span>`
+      : `<span class="badge error">GitLab: ${d.error}</span>`;
+  } catch(e) { el.innerHTML = `<span class="badge error">${e}</span>`; }
+}
+
+async function testLlm() {
+  const el = document.getElementById('testResult');
+  el.textContent = 'Testing...';
+  try {
+    const r = await fetch(`${API}/test-llm`, {method:'POST'});
+    const d = await r.json();
+    el.innerHTML = d.status === 'ok'
+      ? `<span class="badge ok">LLM OK (${d.model})</span>`
+      : `<span class="badge error">LLM: ${d.error}</span>`;
+  } catch(e) { el.innerHTML = `<span class="badge error">${e}</span>`; }
+}
+
+// Poll
+function refresh() {
+  fetchStats();
+  fetchCurrent();
+  fetchEvents();
+  fetchWorkflows();
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

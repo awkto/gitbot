@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # State
     state_db_path: str = "data/gitbot.db"
 
+    # Admin panel
+    admin_enabled: bool = True
+    admin_password: str = ""  # empty = no auth required
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8042
