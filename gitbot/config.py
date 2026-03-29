@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # accessible via admin panel and optionally linked in error comments
     debug_output: bool = False
 
+    # LLM timeout per API call in seconds (0 = no timeout)
+    llm_timeout: int = 300
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8042

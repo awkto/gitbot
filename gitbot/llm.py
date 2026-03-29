@@ -57,11 +57,13 @@ async def complete(task: Task, *, system: str = "", prompt: str) -> str:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
+    timeout = settings.llm_timeout or None
     response = await litellm.acompletion(
         model=model,
         messages=messages,
         api_base=settings.get_api_base(),
         api_key=settings.get_api_key(),
+        timeout=timeout,
     )
     return response.choices[0].message.content
 
@@ -127,7 +129,7 @@ async def tool_loop_with_model(
             tools=tools,
             api_base=settings.get_api_base(),
             api_key=settings.get_api_key(),
-            timeout=120,  # 2 min timeout per call
+            timeout=settings.llm_timeout or None,
         )
 
         if not response.choices:

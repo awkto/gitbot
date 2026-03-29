@@ -24,7 +24,8 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "comments": ["post_comment", "update_comment"],
     "issues": ["create_issue", "update_issue", "search_issues", "link_issues"],
     "code": ["create_branch", "commit_files", "read_file", "list_files",
-             "create_merge_request", "get_mr_diff"],
+             "create_merge_request", "get_mr_diff",
+             "assign_mr", "assign_mr_reviewer"],
     "planning": ["create_milestone", "list_milestones", "assign_milestone",
                   "create_label", "create_wiki_page"],
     "ci": ["list_pipelines", "get_pipeline", "list_pipeline_jobs",
@@ -290,6 +291,45 @@ TOOL_SCHEMAS = [
                     "mr_iid": {"type": "integer"},
                 },
                 "required": ["mr_iid"],
+            },
+        },
+    },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "assign_mr",
+            "description": "Assign users to a merge request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mr_iid": {"type": "integer"},
+                    "usernames": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of usernames to assign",
+                    },
+                },
+                "required": ["mr_iid", "usernames"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "assign_mr_reviewer",
+            "description": "Set reviewers on a merge request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mr_iid": {"type": "integer"},
+                    "usernames": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of usernames to set as reviewers",
+                    },
+                },
+                "required": ["mr_iid", "usernames"],
             },
         },
     },
@@ -722,7 +762,8 @@ TOOL_SCHEMAS = [
 _PROJECT_SCOPED = {
     "create_issue", "update_issue", "search_issues", "link_issues",
     "create_branch", "commit_files", "read_file", "list_files",
-    "create_merge_request", "get_mr_diff", "create_milestone", "list_milestones",
+    "create_merge_request", "get_mr_diff", "assign_mr", "assign_mr_reviewer",
+    "create_milestone", "list_milestones",
     "assign_milestone", "assign_iteration", "create_label", "create_wiki_page",
     "list_pipelines", "get_pipeline", "list_pipeline_jobs", "get_job_log",
     "retry_pipeline", "run_pipeline", "list_vulnerabilities",
@@ -902,6 +943,34 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
             if len(diff) > 8000:
                 diff = diff[:8000] + "\n... (truncated)"
             return diff
+
+        elif tool_name == "assign_mr":
+            mr = project.mergerequests.get(args["mr_iid"])
+            usernames = args["usernames"]
+            if isinstance(usernames, str):
+                usernames = [u.strip().lstrip("@") for u in usernames.split(",")]
+            user_ids = []
+            for username in usernames:
+                users = gl.users.list(username=username.lstrip("@"))
+                if users:
+                    user_ids.append(users[0].id)
+            mr.assignee_ids = user_ids
+            mr.save()
+            return f"Assigned MR !{args['mr_iid']} to {usernames}"
+
+        elif tool_name == "assign_mr_reviewer":
+            mr = project.mergerequests.get(args["mr_iid"])
+            usernames = args["usernames"]
+            if isinstance(usernames, str):
+                usernames = [u.strip().lstrip("@") for u in usernames.split(",")]
+            user_ids = []
+            for username in usernames:
+                users = gl.users.list(username=username.lstrip("@"))
+                if users:
+                    user_ids.append(users[0].id)
+            mr.reviewer_ids = user_ids
+            mr.save()
+            return f"Set reviewers on MR !{args['mr_iid']} to {usernames}"
 
         elif tool_name == "create_milestone":
             data = {"title": args["title"]}
@@ -1112,7 +1181,7 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
             variables = {
                 "input": {
                     "groupPath": args["group_path"],
-                    "iterationCadenceId": cadence_id,
+                    "iterationsCadenceId": cadence_id,
                     "title": args["title"],
                     "startDate": args["start_date"],
                     "dueDate": args["due_date"],
