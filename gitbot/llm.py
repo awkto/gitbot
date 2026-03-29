@@ -157,7 +157,8 @@ async def tool_loop_with_model(
                          round_num, fn_name, {k: str(v)[:60] for k, v in fn_args.items()})
 
                 result = execute_fn(fn_name, fn_args)
-                actions_taken.append({"tool": fn_name, "args": fn_args, "result": result})
+                is_error = isinstance(result, str) and result.startswith("TOOL_ERROR:")
+                actions_taken.append({"tool": fn_name, "args": fn_args, "result": result, "error": is_error})
 
                 messages.append({
                     "role": "tool",

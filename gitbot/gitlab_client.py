@@ -252,3 +252,61 @@ def mark_todo_done(todo_id: int) -> None:
     """Mark a todo as done."""
     gl = get_client()
     gl.http_post(f"/todos/{todo_id}/mark_as_done")
+
+
+def set_mr_labels(project_id: int, mr_iid: int, labels: list[str]) -> None:
+    """Add labels to an MR (merges with existing)."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    mr = project.mergerequests.get(mr_iid)
+    existing = [l for l in (mr.labels or [])]
+    merged = list(set(existing + labels))
+    mr.labels = merged
+    mr.save()
+
+
+def remove_mr_labels(project_id: int, mr_iid: int, labels: list[str]) -> None:
+    """Remove labels from an MR."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    mr = project.mergerequests.get(mr_iid)
+    mr.labels = [l for l in (mr.labels or []) if l not in labels]
+    mr.save()
+
+
+def find_items_by_label(label: str) -> list[dict]:
+    """Find open issues and MRs across all accessible projects with a given label.
+
+    Returns a list of dicts with project_id, target_type, target_iid, title.
+    """
+    gl = get_client()
+    results = []
+
+    # Search issues with this label
+    try:
+        issues = gl.issues.list(labels=[label], state="opened", get_all=True, scope="all")
+        for issue in issues:
+            results.append({
+                "project_id": issue.project_id,
+                "target_type": "Issue",
+                "target_iid": issue.iid,
+                "title": issue.title,
+            })
+    except Exception:
+        pass
+
+    # Search MRs with this label
+    try:
+        mrs = gl.mergerequests.list(labels=[label], state="opened", get_all=True, scope="all")
+        for mr in mrs:
+            pid = mr.project_id if hasattr(mr, "project_id") else mr.source_project_id
+            results.append({
+                "project_id": pid,
+                "target_type": "MergeRequest",
+                "target_iid": mr.iid,
+                "title": mr.title,
+            })
+    except Exception:
+        pass
+
+    return results

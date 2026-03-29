@@ -31,12 +31,12 @@ FAMILY_DEFAULTS: dict[Family, dict[Tier, str]] = {
     Family.OPENAI: {
         Tier.CHEAP: "gpt-4o-mini",
         Tier.MID: "gpt-4o",
-        Tier.STRONG: "gpt-4o",
+        Tier.STRONG: "o3",
     },
     Family.GEMINI: {
         Tier.CHEAP: "gemini/gemini-2.5-flash",
         Tier.MID: "gemini/gemini-2.5-pro",
-        Tier.STRONG: "gemini/gemini-2.5-pro",  # 3.1 preview hangs on tool calls
+        Tier.STRONG: "gemini/gemini-2.5-pro",  # same as MID — escalation auto-skipped
     },
     Family.OLLAMA: {
         Tier.CHEAP: "ollama/qwen2.5-coder:7b",

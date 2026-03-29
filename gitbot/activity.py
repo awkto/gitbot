@@ -66,11 +66,16 @@ class Workflow:
         }
 
 
+MAX_DEBUG_LOGS = 30
+
+
 class ActivityTracker:
     def __init__(self):
         self._events: deque[ActivityEvent] = deque(maxlen=MAX_EVENTS)
         self._workflows: deque[Workflow] = deque(maxlen=MAX_WORKFLOWS)
         self._current: dict[str, Workflow] = {}  # workflow_id -> Workflow
+        self._debug_logs: dict[str, str] = {}  # workflow_id -> debug text
+        self._debug_order: deque[str] = deque(maxlen=MAX_DEBUG_LOGS)
         self._lock = Lock()
         self._stats = {
             "webhooks_received": 0,
@@ -158,6 +163,20 @@ class ActivityTracker:
     def get_current(self) -> list[dict]:
         with self._lock:
             return [w.to_dict() for w in self._current.values()]
+
+    def store_debug_log(self, workflow_id: str, debug_text: str):
+        """Store debug output for a failed workflow."""
+        with self._lock:
+            # Evict oldest if at capacity
+            if len(self._debug_order) >= MAX_DEBUG_LOGS:
+                oldest = self._debug_order[0]
+                self._debug_logs.pop(oldest, None)
+            self._debug_logs[workflow_id] = debug_text
+            self._debug_order.append(workflow_id)
+
+    def get_debug_log(self, workflow_id: str) -> str | None:
+        with self._lock:
+            return self._debug_logs.get(workflow_id)
 
     def get_stats(self) -> dict:
         with self._lock:

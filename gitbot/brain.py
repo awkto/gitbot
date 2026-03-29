@@ -17,7 +17,7 @@ from gitbot.activity import tracker
 from gitbot.config import settings
 from gitbot.context import Situation, fetch_source, MAX_ROUNDS
 from gitbot.models import Task, Tier, resolve_model
-from gitbot.tools import TOOL_SCHEMAS, execute_tool
+from gitbot.tools import TOOL_SCHEMAS, execute_tool, get_tools_for_step
 
 log = logging.getLogger(__name__)
 
@@ -132,12 +132,17 @@ Originating project: "{project_name}" (ID: {project_id})
 
 {id_registry}
 
+{gathered_context}
+
 Your current step: {step_description}
 
 CRITICAL: When a tool needs a project_id, milestone_id, epic_iid, or
 iteration_id, you MUST use the exact IDs from the registry above.
 NEVER guess or invent IDs. If an ID you need is not in the registry,
 say so — do not make one up.
+
+If a tool returns TOOL_ERROR, do NOT retry the same call. Try a different
+approach or note the failure and move on.
 
 When done, list any NEW IDs you created in this format:
 CREATED: type name = id
@@ -158,6 +163,13 @@ async def decide_and_act(sit: Situation) -> None:
     wf = tracker.start_workflow(wf_id, sit.trigger, target_str, sit.project_name)
     tracker.log("info", f"Started: {target_str} ({sit.trigger})", wf_id)
 
+    # Track in state DB so we can resume on restart
+    work_id = state.create_work_item(
+        sit.project_id, sit.target_type, sit.target_iid, wf_id,
+    )
+    sit._wf_id = wf_id
+    sit._work_id = work_id
+
     placeholder_id = _post_placeholder(sit)
 
     try:
@@ -177,11 +189,10 @@ async def decide_and_act(sit: Situation) -> None:
         if not plan or not plan.get("steps"):
             _update_placeholder(sit, placeholder_id,
                                 ":hammer_and_wrench: **Working on it...**")
-            if sit.target_type == "Issue":
-                glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
+            _set_working_label(sit)
 
             tracker.set_plan(wf_id, 1)
-            result = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS)
+            result, _actions = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS)
             tracker.step_completed(wf_id, settings.get_llm_family())
             _update_placeholder(sit, placeholder_id, result)
             _clear_labels(sit)
@@ -197,20 +208,21 @@ async def decide_and_act(sit: Situation) -> None:
                 _update_placeholder(sit, placeholder_id,
                                     ":hammer_and_wrench: **Working through the plan...**")
 
-            if sit.target_type == "Issue":
-                glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
+            _set_working_label(sit)
 
             step_results = []
             id_registry = {}
             for i, step in enumerate(plan["steps"]):
                 tier = Tier(step.get("tier", "cheap"))
                 desc = step.get("description", f"Step {i+1}")
+                step_tools = step.get("tools_needed")
                 log.info("Executing step %d/%d [%s]: %s",
                          i + 1, num_steps, tier, desc[:80])
                 tracker.log("info", f"Step {i+1}/{num_steps} [{tier}]: {desc[:60]}", wf_id)
 
                 result = await _execute_step_with_escalation(
                     sit, desc, tier, TOOL_SCHEMAS, id_registry, i + 1, num_steps,
+                    tools_needed=step_tools,
                 )
                 tracker.step_completed(wf_id, tier)
                 step_results.append(f"**Step {i+1}**: {desc}\n{result}")
@@ -231,12 +243,27 @@ async def decide_and_act(sit: Situation) -> None:
 
         tracker.log("info", f"Completed: {target_str}", wf_id)
         tracker.finish_workflow(wf_id, "completed")
+        state.complete_work_item(work_id)
 
     except Exception as e:
         log.exception("Workflow failed for %s", target_str)
-        tracker.log("error", f"Failed: {e}", wf_id)
-        tracker.finish_workflow(wf_id, "failed", str(e))
-        raise
+        error_str = str(e)
+        is_permission = _is_permission_error(e)
+
+        if is_permission:
+            tracker.log("error", f"Permission denied: {error_str}", wf_id)
+            tracker.finish_workflow(wf_id, "failed", error_str)
+            _post_failure_comment(sit, placeholder_id, "permission", error_str)
+        else:
+            tracker.log("error", f"Error: {error_str}", wf_id)
+            tracker.finish_workflow(wf_id, "failed", error_str)
+            debug_text = _build_debug_log(sit, wf_id, e)
+            if settings.debug_output:
+                tracker.store_debug_log(wf_id, debug_text)
+            _post_failure_comment(sit, placeholder_id, "error", error_str, wf_id=wf_id)
+
+        _clear_labels(sit)
+        state.fail_work_item(work_id)
 
     finally:
         # Clean up pending question if we acted
@@ -321,75 +348,199 @@ async def _make_plan(sit: Situation, summary: str) -> dict | None:
 _TIER_ESCALATION = {Tier.CHEAP: Tier.MID, Tier.MID: Tier.STRONG}
 
 
+def _resolve_model_for_tier(tier: Tier) -> str:
+    """Resolve the concrete model string for a tier."""
+    family = settings.get_llm_family()
+    overrides = settings.tier_overrides()
+    if overrides and tier in overrides:
+        return overrides[tier]
+    from gitbot.models import FAMILY_DEFAULTS
+    return FAMILY_DEFAULTS[family][tier]
+
+
 async def _execute_step_with_escalation(
     sit: Situation, step_description: str, tier: Tier, tools: list[dict],
     id_registry: dict | None, step_num: int, total_steps: int,
+    tools_needed: list[str] | None = None,
 ) -> str:
     """Execute a step, escalating to a stronger model if it fails."""
-    result = await _execute_step(sit, step_description, tier, tools, id_registry)
+    summary, actions = await _execute_step(
+        sit, step_description, tier, tools, id_registry, tools_needed=tools_needed,
+    )
 
-    if _step_looks_failed(result):
+    failure_reason = _step_failure_reason(actions)
+    if failure_reason:
         next_tier = _TIER_ESCALATION.get(tier)
-        if next_tier:
+
+        # Skip escalation if next tier uses the same model (no point retrying)
+        if next_tier and _resolve_model_for_tier(next_tier) == _resolve_model_for_tier(tier):
             log.warning(
-                "Step %d/%d failed on %s — escalating to %s",
+                "Step %d/%d failed on %s but %s uses the same model — skipping escalation",
                 step_num, total_steps, tier, next_tier,
             )
+            next_tier = None
+
+        if next_tier:
+            log.warning(
+                "Step %d/%d failed on %s — escalating to %s (reason: %s)",
+                step_num, total_steps, tier, next_tier, failure_reason,
+            )
             tracker.escalation(sit._wf_id if hasattr(sit, '_wf_id') else "")
-            tracker.log("warn", f"Step {step_num} failed on {tier}, escalating to {next_tier}")
-            result = await _execute_step(
-                sit,
-                f"{step_description}\n\nPREVIOUS ATTEMPT FAILED. The weaker model returned:\n{result[:500]}\n\nPlease complete this step properly.",
-                next_tier, tools, id_registry,
+            tracker.log("warn", f"Step {step_num} failed on {tier}, escalating to {next_tier}: {failure_reason}")
+
+            # Give the stronger model structured failure context
+            error_details = _format_failure_context(actions, failure_reason)
+            escalation_desc = (
+                f"{step_description}\n\n"
+                f"PREVIOUS ATTEMPT FAILED on a weaker model.\n{error_details}\n\n"
+                f"Please complete this step. If a tool returned an error, try a different approach."
+            )
+            summary, actions = await _execute_step(
+                sit, escalation_desc, next_tier, tools, id_registry,
+                tools_needed=tools_needed,
             )
 
-            # If still failed on strong, give up gracefully
-            if _step_looks_failed(result) and next_tier == Tier.STRONG:
-                log.error("Step %d/%d failed even on strong tier", step_num, total_steps)
+            retry_failure = _step_failure_reason(actions)
+            if retry_failure and next_tier == Tier.STRONG:
+                log.error("Step %d/%d failed even on strong tier: %s", step_num, total_steps, retry_failure)
 
-    return result
+    return summary
 
 
-def _step_looks_failed(result: str) -> bool:
-    """Check tool results (ground truth) for failure, not the model's summary."""
-    if not result or result == "*(no actions taken)*" or result == "*(completed)*":
-        return True
+def _step_failure_reason(actions: list[dict]) -> str | None:
+    """Analyze raw tool actions to detect failure. Returns reason string or None if OK."""
+    if not actions:
+        return "no actions taken"
 
-    # Count actual tool successes vs failures in the result
-    success_markers = ["Created ", "Committed ", "Updated ", "Assigned ", "Linked ", "Pushed ", "Triggered "]
-    fail_markers = ["Error:", "404 Not Found", "403 Forbidden", "could not", "not found"]
-    model_gave_up = [
-        "does not include", "not available", "tool availability",
-        "manual creation", "cannot be done", "limited by tool",
-        "I encountered issues", "unable to complete",
+    tool_calls = [a for a in actions if a["tool"] not in ("_text_response", "_empty_response")]
+    text_responses = [a for a in actions if a["tool"] == "_text_response"]
+    empty_responses = [a for a in actions if a["tool"] == "_empty_response"]
+
+    # Empty responses from the model = model failure
+    if empty_responses and not tool_calls and not text_responses:
+        return "model returned empty responses"
+
+    # If the model produced a text response or posted a comment, that's a valid completion
+    # (e.g. "discuss" or "ask clarification" steps)
+    comment_actions = [a for a in tool_calls if a["tool"] == "post_comment"]
+    if text_responses or comment_actions:
+        # Check if the text response indicates the model gave up
+        for resp in text_responses:
+            reason = _text_indicates_gave_up(resp["result"])
+            if reason:
+                return reason
+        # Model produced output — this is success for discussion/comment steps
+        if not tool_calls or comment_actions:
+            return None
+
+    # No tool calls and no text = nothing happened
+    if not tool_calls and not text_responses:
+        return "no actions taken"
+
+    # Check tool results for errors — use structured 'error' flag if available,
+    # fall back to string matching for backwards compatibility
+    failed_tools = []
+    succeeded_tools = []
+    for a in tool_calls:
+        if a["tool"] == "post_comment":
+            succeeded_tools.append(a["tool"])
+            continue
+        if a.get("error"):
+            failed_tools.append(f"{a['tool']}: {a['result'][:100]}")
+        elif isinstance(a["result"], str) and a["result"].startswith("TOOL_ERROR:"):
+            failed_tools.append(f"{a['tool']}: {a['result'][:100]}")
+        else:
+            succeeded_tools.append(a["tool"])
+
+    # All tool calls failed
+    if failed_tools and not succeeded_tools:
+        return f"all tool calls failed — {failed_tools[0]}"
+
+    # Majority of tool calls failed
+    if len(failed_tools) > len(succeeded_tools):
+        return f"{len(failed_tools)}/{len(failed_tools) + len(succeeded_tools)} tool calls failed"
+
+    return None
+
+
+def _text_indicates_gave_up(text: str) -> str | None:
+    """Check if a model's text response indicates it gave up on the task.
+
+    Only matches phrases that are clearly the model talking about its own limitations,
+    not phrases that could appear in legitimate issue/MR content.
+    """
+    if not text:
+        return None
+    lower = text.lower()
+    # These are phrases models use when they can't complete a task
+    gave_up_patterns = [
+        ("limited by tool", "model reported tool limitation"),
+        ("manual creation", "model deferred to manual action"),
+        ("unable to complete", "model unable to complete"),
+        ("i encountered issues", "model reported issues"),
+        ("i cannot", "model reported inability"),
+        ("i'm unable", "model reported inability"),
+        ("tool availability", "model reported tool availability issue"),
     ]
-
-    lower = result.lower()
-    successes = sum(1 for m in success_markers if m.lower() in lower)
-    failures = sum(1 for m in fail_markers if m.lower() in lower)
-    gave_up = any(m in lower for m in model_gave_up)
-
-    # Failed if: model gave up, or zero successes, or mostly errors
-    if gave_up:
-        return True
-    if successes == 0:
-        return True
-    if failures > successes:
-        return True
-
-    return False
+    for pattern, reason in gave_up_patterns:
+        if pattern in lower:
+            return reason
+    return None
 
 
-async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools: list[dict], id_registry: dict | None = None) -> str:
-    """Phase 3: Execute a single step with the appropriate model."""
-    family = settings.get_llm_family()
-    overrides = settings.tier_overrides()
-    model_str = overrides.get(tier) if overrides else None
-    if not model_str:
-        from gitbot.models import FAMILY_DEFAULTS
-        model_str = FAMILY_DEFAULTS[family][tier]
+def _format_gathered_context(sit: Situation, max_length: int = 6000) -> str:
+    """Format the context gathered in Phase 1 for inclusion in step prompts.
 
-    log.info("Executing step [%s] with model %s: %s", tier, model_str, step_description[:80])
+    Condenses the Situation's gathered dict into a readable reference section.
+    Caps total length to avoid blowing up the prompt.
+    """
+    if not sit.gathered:
+        return ""
+
+    parts = ["## Context gathered during analysis:"]
+    total = 0
+    for source, content in sit.gathered.items():
+        if not content or content.startswith("("):
+            continue  # skip empty/error entries
+        # Cap individual sources
+        capped = content[:2000] + "..." if len(content) > 2000 else content
+        entry = f"\n### {source}\n{capped}"
+        if total + len(entry) > max_length:
+            parts.append("\n*(additional context truncated for brevity)*")
+            break
+        parts.append(entry)
+        total += len(entry)
+
+    return "\n".join(parts) if len(parts) > 1 else ""
+
+
+def _format_failure_context(actions: list[dict], reason: str) -> str:
+    """Build structured failure context for the escalation prompt."""
+    lines = [f"Failure reason: {reason}", ""]
+    for a in actions:
+        if a["tool"] in ("_text_response", "_empty_response"):
+            continue
+        result_preview = (a["result"] or "")[:150]
+        lines.append(f"- {a['tool']}({', '.join(f'{k}={v!r}' for k, v in list(a['args'].items())[:3])})")
+        lines.append(f"  Result: {result_preview}")
+    return "\n".join(lines)
+
+
+async def _execute_step(
+    sit: Situation, step_description: str, tier: Tier, tools: list[dict],
+    id_registry: dict | None = None, tools_needed: list[str] | None = None,
+) -> tuple[str, list[dict]]:
+    """Phase 3: Execute a single step with the appropriate model.
+
+    Returns (summary_text, raw_actions) so callers can inspect actions for failure detection.
+    """
+    model_str = _resolve_model_for_tier(tier)
+
+    # Filter tools if the plan specified which ones this step needs
+    step_tools = get_tools_for_step(tools_needed) if tools_needed else tools
+
+    log.info("Executing step [%s] with model %s (%d tools): %s",
+             tier, model_str, len(step_tools), step_description[:80])
 
     # Format ID registry as a clean reference table
     if id_registry:
@@ -400,10 +551,14 @@ async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools
     else:
         registry_str = "## Resource IDs: (none yet — this is the first step)"
 
+    # Include gathered context so the executor sees what the gather phase learned
+    gathered_context = _format_gathered_context(sit)
+
     system = STEP_SYSTEM.format(
         project_name=sit.project_name,
         project_id=sit.project_id,
         id_registry=registry_str,
+        gathered_context=gathered_context,
         step_description=step_description,
     )
 
@@ -437,11 +592,11 @@ async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools
         model=model_str,
         system=system,
         prompt=prompt,
-        tools=tools,
+        tools=step_tools,
         execute_fn=wrapped_executor,
     )
 
-    return _summarize_actions(actions, comments_posted)
+    return _summarize_actions(actions, comments_posted), actions
 
 
 def _summarize_actions(actions: list[dict], comments_posted: list[str]) -> str:
@@ -554,18 +709,15 @@ def _should_skip(sit: Situation) -> bool:
 
 def _post_placeholder(sit: Situation) -> int | None:
     try:
+        body = ":hourglass_flowing_sand: **GitBot is thinking...**"
         if sit.target_type == "Issue":
-            note_id = glc.post_note_on_issue(
-                sit.project_id, sit.target_iid,
-                ":hourglass_flowing_sand: **GitBot is thinking...**"
-            )
+            note_id = glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
             glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::thinking"])
             return note_id
         elif sit.target_type == "MergeRequest":
-            return glc.post_note_on_mr(
-                sit.project_id, sit.target_iid,
-                ":hourglass_flowing_sand: **GitBot is thinking...**"
-            )
+            note_id = glc.post_note_on_mr(sit.project_id, sit.target_iid, body)
+            glc.set_mr_labels(sit.project_id, sit.target_iid, ["gitbot::thinking"])
+            return note_id
     except Exception:
         log.warning("Could not post placeholder")
     return None
@@ -590,15 +742,28 @@ def _remove_placeholder(sit: Situation, placeholder_id: int | None) -> None:
     _clear_labels(sit)
 
 
+def _set_working_label(sit: Situation) -> None:
+    """Set gitbot::working label on the target (Issue or MR)."""
+    try:
+        if sit.target_type == "Issue":
+            glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
+        elif sit.target_type == "MergeRequest":
+            glc.set_mr_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
+    except Exception:
+        pass
+
+
+_GITBOT_LABELS = ["gitbot::thinking", "gitbot::working", "gitbot::waiting"]
+
+
 def _clear_labels(sit: Situation) -> None:
-    if sit.target_type == "Issue":
-        try:
-            glc.remove_issue_labels(
-                sit.project_id, sit.target_iid,
-                ["gitbot::thinking", "gitbot::working", "gitbot::waiting"]
-            )
-        except Exception:
-            pass
+    try:
+        if sit.target_type == "Issue":
+            glc.remove_issue_labels(sit.project_id, sit.target_iid, _GITBOT_LABELS)
+        elif sit.target_type == "MergeRequest":
+            glc.remove_mr_labels(sit.project_id, sit.target_iid, _GITBOT_LABELS)
+    except Exception:
+        pass
 
 
 def _parse_json(raw: str) -> dict:
@@ -607,3 +772,91 @@ def _parse_json(raw: str) -> dict:
         cleaned = re.sub(r"^```\w*\n?", "", cleaned)
         cleaned = re.sub(r"\n?```$", "", cleaned)
     return json.loads(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Failure handling
+# ---------------------------------------------------------------------------
+
+_PERMISSION_PATTERNS = [
+    "403 forbidden", "403 Forbidden",
+    "access denied", "Access Denied",
+    "insufficient permissions", "Insufficient permissions",
+    "not authorized", "Not authorized",
+    "401 unauthorized", "401 Unauthorized",
+]
+
+
+def _is_permission_error(exc: Exception) -> bool:
+    """Check if an exception is a permission/auth problem."""
+    msg = str(exc).lower()
+    return any(p.lower() in msg for p in _PERMISSION_PATTERNS)
+
+
+def _post_failure_comment(
+    sit: Situation,
+    placeholder_id: int | None,
+    failure_type: str,
+    error_str: str,
+    wf_id: str = "",
+) -> None:
+    """Post an appropriate failure comment on the issue/MR."""
+    if failure_type == "permission":
+        body = (
+            ":no_entry: **GitBot doesn't have permission to complete this task.**\n\n"
+            f"Error: `{error_str[:200]}`\n\n"
+            "Please check that the bot's GitLab account has the required access level "
+            "for this project and try again."
+        )
+    else:
+        body = ":x: **GitBot encountered an error and couldn't complete this task.**\n\n"
+        if settings.debug_output and settings.admin_enabled and wf_id:
+            body += (
+                f"A debug log is available in the "
+                f"[admin panel](/admin) (workflow `{wf_id}`).\n"
+            )
+        else:
+            body += "The team has been notified. You can re-assign to retry.\n"
+
+    if placeholder_id:
+        _update_placeholder(sit, placeholder_id, body)
+    else:
+        try:
+            if sit.target_type == "Issue":
+                glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
+            elif sit.target_type == "MergeRequest":
+                glc.post_note_on_mr(sit.project_id, sit.target_iid, body)
+        except Exception:
+            log.warning("Could not post failure comment")
+
+
+def _build_debug_log(sit: Situation, wf_id: str, exc: Exception) -> str:
+    """Build a debug log string for a failed workflow."""
+    import traceback
+
+    parts = [
+        f"=== GitBot Debug Log ===",
+        f"Workflow: {wf_id}",
+        f"Target: {sit.target_type} #{sit.target_iid} — {sit.target_title}",
+        f"Project: {sit.project_name} (ID: {sit.project_id})",
+        f"Trigger: {sit.trigger} by {sit.actor}",
+        f"Event: {sit.event_type}",
+        "",
+        "--- Gathered Context ---",
+    ]
+    for source, content in sit.gathered.items():
+        preview = content[:500] if content else "(empty)"
+        parts.append(f"[{source}]: {preview}")
+
+    parts.append("")
+    parts.append("--- Activity Log ---")
+    events = tracker.get_events(limit=50)
+    for event in reversed(events):
+        if event.get("workflow_id") == wf_id:
+            parts.append(f"  [{event['level']}] {event['message']}")
+
+    parts.append("")
+    parts.append("--- Exception ---")
+    parts.append(traceback.format_exc())
+
+    return "\n".join(parts)

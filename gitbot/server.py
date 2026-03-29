@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from gitbot.config import settings
 from gitbot.models import Family
 from gitbot.router import route_event
-from gitbot.todos import process_pending_todos
+from gitbot.todos import process_pending_todos, resume_incomplete_work
 from gitbot.activity import tracker
 
 def _read_version() -> str:
@@ -42,6 +42,12 @@ async def lifespan(app: FastAPI):
         await process_pending_todos()
     except Exception:
         log.exception("Error processing pending todos on startup")
+
+    log.info("Checking for interrupted work to resume...")
+    try:
+        await resume_incomplete_work()
+    except Exception:
+        log.exception("Error resuming incomplete work on startup")
     yield
 
 
@@ -137,6 +143,15 @@ async def admin_workflows(limit: int = 20):
 async def admin_current():
     _check_admin()
     return tracker.get_current()
+
+
+@app.get("/admin/api/debug/{workflow_id}")
+async def admin_debug_log(workflow_id: str):
+    _check_admin()
+    debug_log = tracker.get_debug_log(workflow_id)
+    if debug_log is None:
+        raise HTTPException(status_code=404, detail="No debug log for this workflow")
+    return {"workflow_id": workflow_id, "debug_log": debug_log}
 
 
 @app.post("/admin/api/save-config")

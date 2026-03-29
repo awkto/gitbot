@@ -152,3 +152,163 @@ def _safe_mark_done(todo_id: int) -> None:
         glc.mark_todo_done(todo_id)
     except Exception:
         log.warning("Failed to mark todo %s as done", todo_id)
+
+
+# ---------------------------------------------------------------------------
+# Resume incomplete work on restart
+# ---------------------------------------------------------------------------
+
+_WORKING_LABELS = ["gitbot::working", "gitbot::thinking"]
+
+
+async def resume_incomplete_work() -> None:
+    """Find and resume work that was interrupted by a crash/restart.
+
+    Uses two signals:
+    1. GitLab labels (gitbot::working / gitbot::thinking) — primary, zero false positives
+    2. State DB IN_PROGRESS items — catches anything labels missed
+    """
+    from gitbot import state
+
+    found: dict[tuple[int, str, int], dict] = {}  # (project_id, type, iid) -> info
+
+    # --- Signal 1: Label scan across all accessible projects ---
+    for label in _WORKING_LABELS:
+        try:
+            items = glc.find_items_by_label(label)
+            for item in items:
+                key = (item["project_id"], item["target_type"], item["target_iid"])
+                if key not in found:
+                    found[key] = {**item, "source": "label"}
+                    log.info(
+                        "Found interrupted work via label: %s #%s (%s) — %s",
+                        item["target_type"], item["target_iid"], label, item["title"],
+                    )
+        except Exception:
+            log.exception("Failed to search for label %s", label)
+
+    # --- Signal 2: State DB — items stuck in IN_PROGRESS ---
+    try:
+        stale_items = state.get_all_in_progress()
+        for item in stale_items:
+            key = (item["project_id"], item["target_type"], item["target_iid"])
+            if key not in found:
+                found[key] = {
+                    "project_id": item["project_id"],
+                    "target_type": item["target_type"],
+                    "target_iid": item["target_iid"],
+                    "title": "",
+                    "source": "state_db",
+                    "work_id": item["id"],
+                }
+                log.info(
+                    "Found interrupted work via state DB: %s #%s (work_id=%s)",
+                    item["target_type"], item["target_iid"], item["id"],
+                )
+            # Mark the stale DB item as failed regardless — the resume will create a new one
+            state.fail_work_item(item["id"])
+    except Exception:
+        log.exception("Failed to check state DB for stale work items")
+
+    if not found:
+        log.info("No interrupted work to resume")
+        return
+
+    log.info("Resuming %d interrupted work item(s)", len(found))
+
+    for key, info in found.items():
+        project_id, target_type, target_iid = key
+        try:
+            await _resume_item(project_id, target_type, target_iid, info)
+        except Exception:
+            log.exception(
+                "Failed to resume %s #%s in project %s",
+                target_type, target_iid, project_id,
+            )
+
+
+async def _resume_item(
+    project_id: int, target_type: str, target_iid: int, info: dict
+) -> None:
+    """Resume a single interrupted work item."""
+    from gitbot.context import Situation
+    from gitbot.brain import decide_and_act
+    from gitbot.config import settings
+
+    gl = glc.get_client()
+    project = gl.projects.get(project_id)
+
+    sit = Situation()
+    sit.bot_username = settings.bot_username
+    sit.project_id = project_id
+    sit.project_name = project.name
+    sit.target_type = target_type
+    sit.target_iid = target_iid
+    sit.actor = "system"  # resumed, not a real user event
+    sit.trigger = "resumed"
+
+    if target_type == "Issue":
+        issue = project.issues.get(target_iid)
+        if issue.state != "opened":
+            log.info("  -> Issue #%s is %s, skipping resume", target_iid, issue.state)
+            _clear_stale_labels(project_id, target_type, target_iid)
+            return
+        sit.target_title = issue.title
+        sit.target_description = issue.description or ""
+        sit.target_state = issue.state
+        sit.bot_is_assignee = any(
+            a.get("username") == sit.bot_username for a in (issue.assignees or [])
+        )
+        sit.event_type = "Issue Hook"
+    elif target_type == "MergeRequest":
+        mr = project.mergerequests.get(target_iid)
+        if mr.state not in ("opened",):
+            log.info("  -> MR !%s is %s, skipping resume", target_iid, mr.state)
+            _clear_stale_labels(project_id, target_type, target_iid)
+            return
+        sit.target_title = mr.title
+        sit.target_description = mr.description or ""
+        sit.target_state = mr.state
+        sit.mr_source_branch = mr.source_branch
+        sit.bot_is_assignee = any(
+            a.get("username") == sit.bot_username for a in (mr.assignees or [])
+        )
+        sit.bot_is_reviewer = any(
+            r.get("username") == sit.bot_username for r in (mr.reviewers or [])
+        )
+        sit.bot_is_author = (
+            mr.author.get("username") == sit.bot_username
+            if isinstance(mr.author, dict) else False
+        )
+        sit.event_type = "Merge Request Hook"
+    else:
+        log.info("  -> Don't know how to resume target_type=%s", target_type)
+        return
+
+    log.info("  -> Resuming %s #%s: %s", target_type, target_iid, sit.target_title)
+
+    # Post a note so the user knows we're picking this back up
+    try:
+        body = (
+            ":arrows_counterclockwise: **GitBot was restarted and is resuming this task...**"
+        )
+        if target_type == "Issue":
+            glc.post_note_on_issue(project_id, target_iid, body)
+        elif target_type == "MergeRequest":
+            glc.post_note_on_mr(project_id, target_iid, body)
+    except Exception:
+        log.warning("  -> Could not post resume notification")
+
+    await decide_and_act(sit)
+
+
+def _clear_stale_labels(project_id: int, target_type: str, target_iid: int) -> None:
+    """Remove gitbot:: labels from a closed/merged item."""
+    labels = ["gitbot::thinking", "gitbot::working", "gitbot::waiting"]
+    try:
+        if target_type == "Issue":
+            glc.remove_issue_labels(project_id, target_iid, labels)
+        elif target_type == "MergeRequest":
+            glc.remove_mr_labels(project_id, target_iid, labels)
+    except Exception:
+        pass

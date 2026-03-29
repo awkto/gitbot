@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     admin_enabled: bool = True
     admin_password: str = ""
 
+    # Debug output — when enabled, failed workflows store debug logs
+    # accessible via admin panel and optionally linked in error comments
+    debug_output: bool = False
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8042

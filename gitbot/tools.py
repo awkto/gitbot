@@ -17,6 +17,59 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Tool categories — used to filter tools per step
+# ---------------------------------------------------------------------------
+
+TOOL_CATEGORIES: dict[str, list[str]] = {
+    "comments": ["post_comment", "update_comment"],
+    "issues": ["create_issue", "update_issue", "search_issues", "link_issues"],
+    "code": ["create_branch", "commit_files", "read_file", "list_files",
+             "create_merge_request", "get_mr_diff"],
+    "planning": ["create_milestone", "list_milestones", "assign_milestone",
+                  "create_label", "create_wiki_page"],
+    "ci": ["list_pipelines", "get_pipeline", "list_pipeline_jobs",
+            "get_job_log", "retry_pipeline", "run_pipeline"],
+    "epics": ["create_epic", "list_epics", "add_issue_to_epic"],
+    "iterations": ["create_iteration_cadence", "create_iteration",
+                    "list_iterations", "assign_iteration"],
+    "admin": ["create_project", "get_project_info", "create_group",
+              "list_groups", "list_members", "add_member",
+              "list_vulnerabilities"],
+}
+
+# Reverse lookup: tool_name → category
+_TOOL_TO_CATEGORY: dict[str, str] = {}
+for _cat, _names in TOOL_CATEGORIES.items():
+    for _name in _names:
+        _TOOL_TO_CATEGORY[_name] = _cat
+
+
+def get_tools_for_step(tools_needed: list[str] | None) -> list[dict]:
+    """Filter TOOL_SCHEMAS to only include tools relevant to a step.
+
+    tools_needed can contain tool names or category names.
+    Always includes 'comments' category (every step can post comments).
+    Returns all tools if tools_needed is None/empty.
+    """
+    if not tools_needed:
+        return TOOL_SCHEMAS
+
+    # Expand category names to tool names
+    allowed_tools: set[str] = set()
+    for name in tools_needed:
+        if name in TOOL_CATEGORIES:
+            allowed_tools.update(TOOL_CATEGORIES[name])
+        else:
+            allowed_tools.add(name)
+
+    # Always include comments
+    allowed_tools.update(TOOL_CATEGORIES["comments"])
+
+    filtered = [t for t in TOOL_SCHEMAS if t["function"]["name"] in allowed_tools]
+    return filtered if filtered else TOOL_SCHEMAS
+
+
+# ---------------------------------------------------------------------------
 # Tool schemas — sent to the LLM with each request
 # ---------------------------------------------------------------------------
 
@@ -1185,4 +1238,4 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
 
     except Exception as e:
         log.warning("Tool %s failed: %s", tool_name, e)
-        return f"Error: {e}"
+        return f"TOOL_ERROR: {tool_name} failed — {e}\nYou should try a different approach or skip this action."

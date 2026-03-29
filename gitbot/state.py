@@ -151,6 +151,33 @@ def get_active_work(
     return None
 
 
+def get_stale_in_progress(max_age_hours: float = 24) -> list[dict]:
+    """Get work items stuck in IN_PROGRESS (likely from a crash).
+
+    Returns items that have been in_progress for longer than expected,
+    indicating the bot was interrupted before completing them.
+    """
+    db = _get_db()
+    cutoff = time.time() - (max_age_hours * 3600)
+    rows = db.execute(
+        """SELECT * FROM work_items
+           WHERE status = ? AND updated_at < ?
+           ORDER BY updated_at DESC""",
+        (Status.IN_PROGRESS, cutoff),
+    ).fetchall()
+    return [dict(row) | {"context": json.loads(row["context"])} for row in rows]
+
+
+def get_all_in_progress() -> list[dict]:
+    """Get all work items currently in IN_PROGRESS status."""
+    db = _get_db()
+    rows = db.execute(
+        "SELECT * FROM work_items WHERE status = ? ORDER BY updated_at DESC",
+        (Status.IN_PROGRESS,),
+    ).fetchall()
+    return [dict(row) | {"context": json.loads(row["context"])} for row in rows]
+
+
 def update_context(work_id: int, context: dict) -> None:
     """Merge new keys into a work item's context."""
     db = _get_db()
