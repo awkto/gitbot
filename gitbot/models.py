@@ -34,9 +34,9 @@ FAMILY_DEFAULTS: dict[Family, dict[Tier, str]] = {
         Tier.STRONG: "o3",
     },
     Family.GEMINI: {
-        Tier.CHEAP: "gemini/gemini-2.5-flash",
-        Tier.MID: "gemini/gemini-2.5-pro",
-        Tier.STRONG: "gemini/gemini-2.5-pro",  # same as MID — escalation auto-skipped
+        Tier.CHEAP: "gemini/gemini-3-flash-preview",
+        Tier.MID: "gemini/gemini-3-flash-preview",
+        Tier.STRONG: "gemini/gemini-3.1-pro-preview",
     },
     Family.OLLAMA: {
         Tier.CHEAP: "ollama/qwen2.5-coder:7b",
