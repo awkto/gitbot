@@ -79,14 +79,17 @@
       <label class="label">GitLab URL<br><input id="cfgGitlabUrl" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="https://gitlab.example.com"></label>
       <label class="label">GitLab Token<br><input id="cfgGitlabToken" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="glpat-xxx"></label>
       <label class="label">Bot Username<br><input id="cfgBotUsername" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="gitbot"></label>
-      <label class="label">LLM API Key<br><input id="cfgLlmKey" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="Auto-detects provider from key prefix"></label>
-      <label class="label">LLM Family (optional)<br>
+      <label class="label">Anthropic Key<br><input id="cfgAnthropicKey" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="sk-ant-..."></label>
+      <label class="label">Gemini Key<br><input id="cfgGeminiKey" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="AIza..."></label>
+      <label class="label">OpenAI Key<br><input id="cfgOpenaiKey" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="sk-..."></label>
+      <label class="label">Ollama / vLLM URL<br><input id="cfgOllamaUrl" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="http://localhost:11434"></label>
+      <label class="label">Active Provider<br>
         <select id="cfgLlmFamily" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px">
-          <option value="">Auto-detect from API key</option>
+          <option value="">First available key</option>
           <option value="anthropic">Anthropic (Claude)</option>
           <option value="gemini">Google Gemini</option>
           <option value="openai">OpenAI</option>
-          <option value="ollama">Ollama (local)</option>
+          <option value="ollama">Ollama / vLLM</option>
         </select>
       </label>
       <label class="label">SSL Verify<br>
@@ -259,7 +262,10 @@ async function saveConfig() {
     gitlab_url: document.getElementById('cfgGitlabUrl').value,
     gitlab_token: document.getElementById('cfgGitlabToken').value,
     bot_username: document.getElementById('cfgBotUsername').value || 'gitbot',
-    llm_api_key: document.getElementById('cfgLlmKey').value,
+    anthropic_api_key: document.getElementById('cfgAnthropicKey').value,
+    gemini_api_key: document.getElementById('cfgGeminiKey').value,
+    openai_api_key: document.getElementById('cfgOpenaiKey').value,
+    ollama_url: document.getElementById('cfgOllamaUrl').value,
     llm_family: document.getElementById('cfgLlmFamily').value,
     gitlab_ssl_verify: document.getElementById('cfgSslVerify').value,
   };

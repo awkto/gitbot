@@ -18,10 +18,18 @@ class Settings(BaseSettings):
     bot_username: str = "gitbot"
     gitlab_ssl_verify: bool = True
 
-    # LLM
+    # LLM — which provider to use
     llm_family: Family | None = None  # anthropic, gemini, openai, ollama, claude-code
-    llm_api_key: str = ""
-    llm_api_base: str | None = None  # for ollama: "http://localhost:11434"
+
+    # Provider API keys — set whichever ones you have
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
+    openai_api_key: str = ""
+
+    # Self-hosted (Ollama, vLLM, etc.)
+    vllm_url: str = ""       # e.g. http://localhost:8000/v1
+    vllm_api_key: str = ""   # optional, some vLLM setups need one
+    ollama_url: str = ""     # e.g. http://localhost:11434
 
     # Optional per-tier model overrides (litellm model strings)
     llm_model_cheap: str | None = None
@@ -43,9 +51,38 @@ class Settings(BaseSettings):
     port: int = 8042
 
     def get_llm_family(self) -> Family:
+        """Get the active LLM family. Explicit setting, or first available key."""
         if self.llm_family:
             return self.llm_family
-        return Family.CLAUDE_CODE  # fallback for unconfigured state
+        # Pick first available
+        if self.anthropic_api_key:
+            return Family.ANTHROPIC
+        if self.gemini_api_key:
+            return Family.GEMINI
+        if self.openai_api_key:
+            return Family.OPENAI
+        if self.ollama_url:
+            return Family.OLLAMA
+        return Family.CLAUDE_CODE
+
+    def get_api_key(self) -> str:
+        """Get the API key for the active family."""
+        family = self.get_llm_family()
+        return {
+            Family.ANTHROPIC: self.anthropic_api_key,
+            Family.GEMINI: self.gemini_api_key,
+            Family.OPENAI: self.openai_api_key,
+            Family.OLLAMA: self.vllm_api_key,
+        }.get(family, "")
+
+    def get_api_base(self) -> str | None:
+        """Get the API base URL for the active family (only for self-hosted)."""
+        family = self.get_llm_family()
+        if family == Family.OLLAMA:
+            return self.ollama_url or self.vllm_url or None
+        if self.vllm_url:
+            return self.vllm_url
+        return None
 
     def tier_overrides(self) -> dict[Tier, str] | None:
         overrides = {}
@@ -59,34 +96,51 @@ class Settings(BaseSettings):
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.gitlab_token and (self.llm_api_key or self.llm_family == Family.CLAUDE_CODE))
+        return bool(self.gitlab_token and self.get_api_key())
 
     @property
     def setup_needed(self) -> bool:
-        return not self.gitlab_token or not self.llm_family
+        return not self.gitlab_token or not self.get_api_key()
+
+    @property
+    def available_providers(self) -> list[str]:
+        """Which providers have keys configured."""
+        providers = []
+        if self.anthropic_api_key:
+            providers.append("anthropic")
+        if self.gemini_api_key:
+            providers.append("gemini")
+        if self.openai_api_key:
+            providers.append("openai")
+        if self.ollama_url or self.vllm_url:
+            providers.append("ollama/vllm")
+        return providers
 
 
 _ENV_TEMPLATE = """\
 # GitBot Configuration
 # Edit this file and restart, or configure via the admin panel at /admin
 
-# GitLab instance
+# GitLab
 GITBOT_GITLAB_URL=https://gitlab.example.com
 GITBOT_GITLAB_TOKEN=
 GITBOT_BOT_USERNAME=gitbot
 # GITBOT_GITLAB_SSL_VERIFY=true
-# GITBOT_WEBHOOK_SECRET=
 
-# LLM Provider: anthropic, gemini, openai, ollama, claude-code
-GITBOT_LLM_FAMILY=
-GITBOT_LLM_API_KEY=
+# LLM Provider Keys — set whichever you have
+# GITBOT_ANTHROPIC_API_KEY=sk-ant-...
+# GITBOT_GEMINI_API_KEY=AIza...
+# GITBOT_OPENAI_API_KEY=sk-...
 
-# Optional: override models per tier
-# GITBOT_LLM_MODEL_CHEAP=
-# GITBOT_LLM_MODEL_MID=
-# GITBOT_LLM_MODEL_STRONG=
+# Self-hosted (optional)
+# GITBOT_OLLAMA_URL=http://localhost:11434
+# GITBOT_VLLM_URL=http://localhost:8000/v1
+# GITBOT_VLLM_API_KEY=
 
-# Admin panel (disable with false for production)
+# Active provider (defaults to first available key)
+# GITBOT_LLM_FAMILY=anthropic
+
+# Admin panel
 GITBOT_ADMIN_ENABLED=true
 """
 

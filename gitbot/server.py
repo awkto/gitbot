@@ -108,7 +108,8 @@ async def admin_stats():
         "bot_username": settings.bot_username,
         "llm_family": str(settings.get_llm_family()),
         "gitlab_connected": bool(settings.gitlab_token),
-        "llm_configured": bool(settings.llm_api_key or settings.get_llm_family() == Family.CLAUDE_CODE),
+        "llm_configured": settings.is_configured or settings.get_llm_family() == Family.CLAUDE_CODE,
+        "available_providers": settings.available_providers,
         "setup_needed": settings.setup_needed,
     }
     return stats
@@ -146,7 +147,11 @@ async def admin_save_config(request: Request):
         "gitlab_ssl_verify": "GITBOT_GITLAB_SSL_VERIFY",
         "webhook_secret": "GITBOT_WEBHOOK_SECRET",
         "llm_family": "GITBOT_LLM_FAMILY",
-        "llm_api_key": "GITBOT_LLM_API_KEY",
+        "anthropic_api_key": "GITBOT_ANTHROPIC_API_KEY",
+        "gemini_api_key": "GITBOT_GEMINI_API_KEY",
+        "openai_api_key": "GITBOT_OPENAI_API_KEY",
+        "ollama_url": "GITBOT_OLLAMA_URL",
+        "vllm_url": "GITBOT_VLLM_URL",
         "admin_enabled": "GITBOT_ADMIN_ENABLED",
     }
     for field, env_var in field_map.items():

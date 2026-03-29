@@ -60,8 +60,8 @@ async def complete(task: Task, *, system: str = "", prompt: str) -> str:
     response = await litellm.acompletion(
         model=model,
         messages=messages,
-        api_base=settings.llm_api_base,
-        api_key=settings.llm_api_key,
+        api_base=settings.get_api_base(),
+        api_key=settings.get_api_key(),
     )
     return response.choices[0].message.content
 
