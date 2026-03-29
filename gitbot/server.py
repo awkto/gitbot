@@ -48,6 +48,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="GitBot", version=APP_VERSION, lifespan=lifespan)
 
 
+@app.get("/")
+async def root():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse("/admin")
+
+
 # ---------------------------------------------------------------------------
 # Webhook endpoint
 # ---------------------------------------------------------------------------
