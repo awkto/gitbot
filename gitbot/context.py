@@ -134,9 +134,9 @@ def build_minimal(event_type: str, payload: dict) -> Situation:
     sit = Situation()
     sit.event_type = event_type
     sit.bot_username = settings.bot_username
-    sit.actor = payload.get("user", {}).get("username", "unknown")
-    sit.project_id = payload.get("project", {}).get("id", 0)
-    sit.project_name = payload.get("project", {}).get("name", "")
+    sit.actor = (payload.get("user") or {}).get("username", "unknown")
+    sit.project_id = (payload.get("project") or {}).get("id", 0)
+    sit.project_name = (payload.get("project") or {}).get("name", "")
 
     if event_type == "Issue Hook":
         _extract_issue_basics(sit, payload)
