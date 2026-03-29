@@ -7,11 +7,6 @@ from gitbot.models import Family, Tier
 
 log = logging.getLogger(__name__)
 
-# Keys that indicate a specific provider
-_ANTHROPIC_PREFIX = "sk-ant-"
-_GEMINI_PREFIX = "AIza"
-_OPENAI_PREFIX = "sk-"
-
 
 class Settings(BaseSettings):
     model_config = {"env_prefix": "GITBOT_", "env_file": ".env"}
@@ -23,8 +18,8 @@ class Settings(BaseSettings):
     bot_username: str = "gitbot"
     gitlab_ssl_verify: bool = True
 
-    # LLM — family is auto-detected from API key if not set explicitly
-    llm_family: Family | None = None
+    # LLM
+    llm_family: Family | None = None  # anthropic, gemini, openai, ollama, claude-code
     llm_api_key: str = ""
     llm_api_base: str | None = None  # for ollama: "http://localhost:11434"
 
@@ -48,21 +43,9 @@ class Settings(BaseSettings):
     port: int = 8042
 
     def get_llm_family(self) -> Family:
-        """Resolve LLM family: explicit setting > auto-detect from key > fallback."""
         if self.llm_family:
             return self.llm_family
-
-        key = self.llm_api_key
-        if key.startswith(_ANTHROPIC_PREFIX):
-            return Family.ANTHROPIC
-        if key.startswith(_GEMINI_PREFIX):
-            return Family.GEMINI
-        if key.startswith(_OPENAI_PREFIX):
-            return Family.OPENAI
-        if self.llm_api_base and "11434" in self.llm_api_base:
-            return Family.OLLAMA
-
-        return Family.CLAUDE_CODE  # fallback
+        return Family.CLAUDE_CODE  # fallback for unconfigured state
 
     def tier_overrides(self) -> dict[Tier, str] | None:
         overrides = {}
@@ -76,11 +59,11 @@ class Settings(BaseSettings):
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.gitlab_token and self.llm_api_key)
+        return bool(self.gitlab_token and (self.llm_api_key or self.llm_family == Family.CLAUDE_CODE))
 
     @property
     def setup_needed(self) -> bool:
-        return not self.gitlab_token
+        return not self.gitlab_token or not self.llm_family
 
 
 _ENV_TEMPLATE = """\
@@ -94,12 +77,8 @@ GITBOT_BOT_USERNAME=gitbot
 # GITBOT_GITLAB_SSL_VERIFY=true
 # GITBOT_WEBHOOK_SECRET=
 
-# LLM Provider — auto-detected from API key if not set:
-#   sk-ant-... → anthropic
-#   AIza...    → gemini
-#   sk-...     → openai
-# Or set explicitly: anthropic, gemini, openai, ollama, claude-code
-# GITBOT_LLM_FAMILY=
+# LLM Provider: anthropic, gemini, openai, ollama, claude-code
+GITBOT_LLM_FAMILY=
 GITBOT_LLM_API_KEY=
 
 # Optional: override models per tier

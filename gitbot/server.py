@@ -107,7 +107,6 @@ async def admin_stats():
         "gitlab_url": settings.gitlab_url,
         "bot_username": settings.bot_username,
         "llm_family": str(settings.get_llm_family()),
-        "llm_family_explicit": settings.llm_family is not None,
         "gitlab_connected": bool(settings.gitlab_token),
         "llm_configured": bool(settings.llm_api_key or settings.get_llm_family() == Family.CLAUDE_CODE),
         "setup_needed": settings.setup_needed,

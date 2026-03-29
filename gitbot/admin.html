@@ -152,15 +152,11 @@ async function fetchStats() {
       banner.style.display = 'none';
     }
 
-    const familyLabel = d.config.llm_family_explicit
-      ? d.config.llm_family
-      : `${d.config.llm_family} (auto)`;
-
     document.getElementById('configRow').innerHTML = `
       <div class="config-item"><div class="label">GitLab</div>${d.config.gitlab_url}
         <span class="badge ${d.config.gitlab_connected ? 'ok' : 'error'}">${d.config.gitlab_connected ? 'connected' : 'no token'}</span></div>
       <div class="config-item"><div class="label">Bot User</div>@${d.config.bot_username}</div>
-      <div class="config-item"><div class="label">LLM</div>${familyLabel}
+      <div class="config-item"><div class="label">LLM</div>${d.config.llm_family}
         <span class="badge ${d.config.llm_configured ? 'ok' : 'error'}">${d.config.llm_configured ? 'ready' : 'no key'}</span></div>
     `;
 
