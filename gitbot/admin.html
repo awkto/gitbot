@@ -112,6 +112,17 @@
   <h2>Active Workflows</h2>
   <div id="currentWorkflows"><span class="meta">None</span></div>
 
+  <!-- Workflow detail panel (hidden until clicked) -->
+  <div id="workflowDetail" style="display:none;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:1rem;margin-bottom:1rem">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin:0;border:none;padding:0" id="detailTitle">Workflow</h2>
+      <button class="btn" onclick="closeDetail()">Close</button>
+    </div>
+    <div id="detailMeta" class="meta" style="margin:0.5rem 0"></div>
+    <div class="progress" style="margin-bottom:0.5rem"><div class="progress-bar"><div class="progress-fill" id="detailProgress" style="width:0%"></div></div></div>
+    <div class="events" id="detailEvents" style="max-height:300px"></div>
+  </div>
+
   <!-- Event Log -->
   <h2>Activity Feed <button class="btn" onclick="clearEvents()" style="float:right;font-size:0.7rem">Clear</button></h2>
   <div class="events" id="eventLog"></div>
@@ -119,7 +130,7 @@
   <!-- History -->
   <h2>Recent Workflows</h2>
   <table>
-    <thead><tr><th>Target</th><th>Trigger</th><th>Steps</th><th>Tools</th><th>Models</th><th>Time</th><th>Status</th></tr></thead>
+    <thead><tr><th>Target</th><th>Trigger</th><th>Steps</th><th>Tools</th><th>Models</th><th>Time</th><th>Status</th><th></th></tr></thead>
     <tbody id="workflowHistory"></tbody>
   </table>
 </div>
@@ -180,7 +191,7 @@ async function fetchCurrent() {
     if (!wfs.length) { el.innerHTML = '<span class="meta">No active workflows</span>'; return; }
     el.innerHTML = wfs.map(w => {
       const pct = w.plan_steps ? Math.round(w.completed_steps / w.plan_steps * 100) : 0;
-      return `<div class="workflow">
+      return `<div class="workflow" style="cursor:pointer" onclick="selectWorkflow('${w.id}')">
         <div class="header">
           <span class="target">${w.target}</span>
           <span class="meta">${w.project} &middot; ${dur(w.elapsed_seconds)}</span>
@@ -208,12 +219,14 @@ function renderEvents() {
 
 function clearEvents() { allEvents = []; renderEvents(); }
 
+let selectedWorkflow = null;
+
 async function fetchWorkflows() {
   try {
     const r = await fetch(`${API}/workflows?limit=20`);
     const wfs = await r.json();
     document.getElementById('workflowHistory').innerHTML = wfs.map(w =>
-      `<tr>
+      `<tr style="cursor:pointer" onclick="selectWorkflow('${w.id}')">
         <td>${w.target}</td>
         <td>${w.trigger}</td>
         <td>${w.completed_steps}/${w.plan_steps}</td>
@@ -221,9 +234,52 @@ async function fetchWorkflows() {
         <td>${w.models_used.join(', ') || '-'}</td>
         <td>${dur(w.elapsed_seconds)}</td>
         <td><span class="badge ${w.status === 'completed' ? 'ok' : w.status === 'running' ? 'warn' : 'error'}">${w.status}</span></td>
+        <td style="font-size:0.7rem;color:#484f58">${w.id}</td>
       </tr>`
     ).join('');
+
+    // Update detail panel if one is selected
+    if (selectedWorkflow) {
+      const wf = wfs.find(w => w.id === selectedWorkflow);
+      if (wf) updateDetailPanel(wf);
+    }
   } catch(e) {}
+}
+
+function selectWorkflow(id) {
+  selectedWorkflow = id;
+  document.getElementById('workflowDetail').style.display = 'block';
+  // Filter events for this workflow
+  updateDetailEvents();
+  // Scroll to it
+  document.getElementById('workflowDetail').scrollIntoView({behavior:'smooth'});
+}
+
+function closeDetail() {
+  selectedWorkflow = null;
+  document.getElementById('workflowDetail').style.display = 'none';
+}
+
+function updateDetailPanel(wf) {
+  document.getElementById('detailTitle').textContent = `${wf.target} — ${wf.trigger}`;
+  const pct = wf.plan_steps ? Math.round(wf.completed_steps / wf.plan_steps * 100) : 0;
+  document.getElementById('detailProgress').style.width = `${pct}%`;
+  document.getElementById('detailMeta').innerHTML =
+    `<span class="badge ${wf.status === 'completed' ? 'ok' : wf.status === 'running' ? 'warn' : 'error'}">${wf.status}</span> ` +
+    `Steps: ${wf.completed_steps}/${wf.plan_steps} | Tools: ${wf.tool_calls} | ` +
+    `Models: ${wf.models_used.join(', ') || '-'} | ${dur(wf.elapsed_seconds)} | ` +
+    `${wf.escalations ? wf.escalations + ' escalation(s)' : ''}`;
+  updateDetailEvents();
+}
+
+function updateDetailEvents() {
+  if (!selectedWorkflow) return;
+  const filtered = allEvents.filter(e => e.workflow_id === selectedWorkflow);
+  document.getElementById('detailEvents').innerHTML = filtered.length
+    ? filtered.map(e =>
+        `<div class="event ${e.level}"><span class="ts">${fmt(e.timestamp)}</span> ${e.message}</div>`
+      ).join('')
+    : '<div class="meta" style="padding:0.5rem">No events for this workflow</div>';
 }
 
 async function testGitlab() {
