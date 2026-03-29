@@ -44,10 +44,14 @@ async def lifespan(app: FastAPI):
         log.exception("Error processing pending todos on startup")
 
     log.info("Checking for interrupted work to resume...")
-    try:
-        await resume_incomplete_work()
-    except Exception:
-        log.exception("Error resuming incomplete work on startup")
+    # Run in background so the server starts accepting requests immediately
+    async def _resume_in_background():
+        try:
+            await resume_incomplete_work()
+        except Exception:
+            log.exception("Error resuming incomplete work on startup")
+
+    asyncio.create_task(_resume_in_background())
     yield
 
 
