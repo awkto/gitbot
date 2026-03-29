@@ -57,14 +57,49 @@
 </head>
 <body>
 <div class="container">
-  <h1><span class="dot" id="statusDot"></span> GitBot Admin</h1>
+  <h1><span class="dot" id="statusDot"></span> GitBot Admin <span id="versionBadge" style="font-size:0.7rem;color:#8b949e"></span></h1>
+
+  <!-- Setup banner -->
+  <div id="setupBanner" style="display:none;background:#1c1612;border:1px solid #9e6a03;border-radius:6px;padding:1rem;margin-bottom:1rem">
+    <strong>Setup Required</strong> — Configure GitLab and LLM settings below to get started.
+  </div>
 
   <!-- Config -->
   <div class="config-row" id="configRow"></div>
-  <div style="margin-bottom:1rem">
+  <div style="margin-bottom:0.5rem">
     <button class="btn" onclick="testGitlab()">Test GitLab</button>
     <button class="btn" onclick="testLlm()">Test LLM</button>
+    <button class="btn" onclick="toggleSetup()">Configure</button>
     <span id="testResult" style="margin-left:0.5rem;font-size:0.85rem"></span>
+  </div>
+
+  <!-- Config form (hidden by default) -->
+  <div id="setupForm" style="display:none;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:1rem;margin-bottom:1rem">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem">
+      <label class="label">GitLab URL<br><input id="cfgGitlabUrl" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="https://gitlab.example.com"></label>
+      <label class="label">GitLab Token<br><input id="cfgGitlabToken" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="glpat-xxx"></label>
+      <label class="label">Bot Username<br><input id="cfgBotUsername" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="gitbot"></label>
+      <label class="label">LLM API Key<br><input id="cfgLlmKey" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="Auto-detects provider from key prefix"></label>
+      <label class="label">LLM Family (optional)<br>
+        <select id="cfgLlmFamily" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px">
+          <option value="">Auto-detect from API key</option>
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="openai">OpenAI</option>
+          <option value="ollama">Ollama (local)</option>
+        </select>
+      </label>
+      <label class="label">SSL Verify<br>
+        <select id="cfgSslVerify" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px">
+          <option value="true">Yes</option>
+          <option value="false">No (self-signed certs)</option>
+        </select>
+      </label>
+    </div>
+    <div style="margin-top:0.75rem">
+      <button class="btn primary" onclick="saveConfig()">Save &amp; Restart Required</button>
+      <span id="saveResult" style="margin-left:0.5rem;font-size:0.85rem"></span>
+    </div>
   </div>
 
   <!-- Stats -->
@@ -105,12 +140,27 @@ async function fetchStats() {
     const d = await r.json();
 
     document.getElementById('statusDot').className = 'dot' + (d.config.gitlab_connected && d.config.llm_configured ? '' : ' error');
+    document.getElementById('versionBadge').textContent = d.version ? `v${d.version}` : '';
+
+    // Show setup banner if needed
+    const banner = document.getElementById('setupBanner');
+    const form = document.getElementById('setupForm');
+    if (d.config.setup_needed) {
+      banner.style.display = 'block';
+      form.style.display = 'block';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    const familyLabel = d.config.llm_family_explicit
+      ? d.config.llm_family
+      : `${d.config.llm_family} (auto)`;
 
     document.getElementById('configRow').innerHTML = `
       <div class="config-item"><div class="label">GitLab</div>${d.config.gitlab_url}
         <span class="badge ${d.config.gitlab_connected ? 'ok' : 'error'}">${d.config.gitlab_connected ? 'connected' : 'no token'}</span></div>
       <div class="config-item"><div class="label">Bot User</div>@${d.config.bot_username}</div>
-      <div class="config-item"><div class="label">LLM</div>${d.config.llm_family}
+      <div class="config-item"><div class="label">LLM</div>${familyLabel}
         <span class="badge ${d.config.llm_configured ? 'ok' : 'error'}">${d.config.llm_configured ? 'ready' : 'no key'}</span></div>
     `;
 
@@ -198,6 +248,33 @@ async function testLlm() {
     el.innerHTML = d.status === 'ok'
       ? `<span class="badge ok">LLM OK (${d.model})</span>`
       : `<span class="badge error">LLM: ${d.error}</span>`;
+  } catch(e) { el.innerHTML = `<span class="badge error">${e}</span>`; }
+}
+
+function toggleSetup() {
+  const f = document.getElementById('setupForm');
+  f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+
+async function saveConfig() {
+  const el = document.getElementById('saveResult');
+  el.textContent = 'Saving...';
+  const data = {
+    gitlab_url: document.getElementById('cfgGitlabUrl').value,
+    gitlab_token: document.getElementById('cfgGitlabToken').value,
+    bot_username: document.getElementById('cfgBotUsername').value || 'gitbot',
+    llm_api_key: document.getElementById('cfgLlmKey').value,
+    llm_family: document.getElementById('cfgLlmFamily').value,
+    gitlab_ssl_verify: document.getElementById('cfgSslVerify').value,
+  };
+  // Remove empty values
+  Object.keys(data).forEach(k => { if (!data[k]) delete data[k]; });
+  try {
+    const r = await fetch(`${API}/save-config`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    const d = await r.json();
+    el.innerHTML = d.status === 'ok'
+      ? `<span class="badge ok">${d.message}</span>`
+      : `<span class="badge error">${d.error}</span>`;
   } catch(e) { el.innerHTML = `<span class="badge error">${e}</span>`; }
 }
 

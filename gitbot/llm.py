@@ -44,7 +44,7 @@ async def _claude_code_complete(system: str, prompt: str) -> str:
 
 async def complete(task: Task, *, system: str = "", prompt: str) -> str:
     """Simple completion — no tools."""
-    family = settings.llm_family
+    family = settings.get_llm_family()
     model = resolve_model(family, task, settings.tier_overrides())
 
     log.info("LLM request: task=%s family=%s model=%s", task, family, model)
@@ -75,7 +75,7 @@ async def tool_loop(
     execute_fn,
 ) -> list[dict]:
     """Run a tool-use loop using the model resolved from the task tier."""
-    family = settings.llm_family
+    family = settings.get_llm_family()
     model = resolve_model(family, task, settings.tier_overrides())
     return await tool_loop_with_model(
         model=model, system=system, prompt=prompt, tools=tools, execute_fn=execute_fn,
@@ -108,7 +108,7 @@ async def tool_loop_with_model(
     log.info("Tool loop start: model=%s tools=%d", model, len(tools))
 
     # Claude Code CLI doesn't support tool_use
-    if settings.llm_family == Family.CLAUDE_CODE:
+    if settings.get_llm_family() == Family.CLAUDE_CODE:
         log.warning("Claude Code backend doesn't support tool calling, using simple completion")
         result = await _claude_code_complete(system, prompt)
         return [{"tool": "_text_response", "args": {}, "result": result}]

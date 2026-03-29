@@ -182,7 +182,7 @@ async def decide_and_act(sit: Situation) -> None:
 
             tracker.set_plan(wf_id, 1)
             result = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS)
-            tracker.step_completed(wf_id, settings.llm_family)
+            tracker.step_completed(wf_id, settings.get_llm_family())
             _update_placeholder(sit, placeholder_id, result)
             _clear_labels(sit)
         else:
@@ -382,7 +382,7 @@ def _step_looks_failed(result: str) -> bool:
 
 async def _execute_step(sit: Situation, step_description: str, tier: Tier, tools: list[dict], id_registry: dict | None = None) -> str:
     """Phase 3: Execute a single step with the appropriate model."""
-    family = settings.llm_family
+    family = settings.get_llm_family()
     overrides = settings.tier_overrides()
     model_str = overrides.get(tier) if overrides else None
     if not model_str:

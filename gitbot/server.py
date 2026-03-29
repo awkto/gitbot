@@ -9,6 +9,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from gitbot.config import settings
+from gitbot.models import Family
 from gitbot.router import route_event
 from gitbot.todos import process_pending_todos
 from gitbot.activity import tracker
@@ -27,6 +28,15 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from gitbot.config import ensure_env_file
+    ensure_env_file()
+
+    if settings.setup_needed:
+        log.warning("GitBot is not configured. Visit /admin to set up.")
+    else:
+        log.info("GitLab: %s as @%s | LLM: %s",
+                 settings.gitlab_url, settings.bot_username, settings.get_llm_family())
+
     log.info("Checking for pending todos (crash recovery)...")
     try:
         await process_pending_todos()
@@ -96,9 +106,11 @@ async def admin_stats():
     stats["config"] = {
         "gitlab_url": settings.gitlab_url,
         "bot_username": settings.bot_username,
-        "llm_family": settings.llm_family,
+        "llm_family": str(settings.get_llm_family()),
+        "llm_family_explicit": settings.llm_family is not None,
         "gitlab_connected": bool(settings.gitlab_token),
-        "llm_configured": bool(settings.llm_api_key or settings.llm_family == "claude-code"),
+        "llm_configured": bool(settings.llm_api_key or settings.get_llm_family() == Family.CLAUDE_CODE),
+        "setup_needed": settings.setup_needed,
     }
     return stats
 
@@ -121,6 +133,33 @@ async def admin_current():
     return tracker.get_current()
 
 
+@app.post("/admin/api/save-config")
+async def admin_save_config(request: Request):
+    _check_admin()
+    data = await request.json()
+
+    # Build env file content from provided fields
+    lines = []
+    field_map = {
+        "gitlab_url": "GITBOT_GITLAB_URL",
+        "gitlab_token": "GITBOT_GITLAB_TOKEN",
+        "bot_username": "GITBOT_BOT_USERNAME",
+        "gitlab_ssl_verify": "GITBOT_GITLAB_SSL_VERIFY",
+        "webhook_secret": "GITBOT_WEBHOOK_SECRET",
+        "llm_family": "GITBOT_LLM_FAMILY",
+        "llm_api_key": "GITBOT_LLM_API_KEY",
+        "admin_enabled": "GITBOT_ADMIN_ENABLED",
+    }
+    for field, env_var in field_map.items():
+        if field in data and data[field] != "":
+            lines.append(f"{env_var}={data[field]}")
+
+    env_content = "\n".join(lines) + "\n"
+    Path(".env").write_text(env_content)
+
+    return {"status": "ok", "message": "Config saved. Restart the container to apply changes."}
+
+
 @app.post("/admin/api/test-gitlab")
 async def admin_test_gitlab():
     _check_admin()
@@ -140,6 +179,6 @@ async def admin_test_llm():
         from gitbot import llm
         from gitbot.models import Task
         result = await llm.complete(Task.TRIAGE, system="Say OK", prompt="Test")
-        return {"status": "ok", "model": settings.llm_family, "response": result[:100]}
+        return {"status": "ok", "model": settings.get_llm_family(), "response": result[:100]}
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
