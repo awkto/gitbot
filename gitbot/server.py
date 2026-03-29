@@ -13,6 +13,14 @@ from gitbot.router import route_event
 from gitbot.todos import process_pending_todos
 from gitbot.activity import tracker
 
+def _read_version() -> str:
+    try:
+        return Path(__file__).parent.parent.joinpath("version").read_text().strip()
+    except Exception:
+        return "dev"
+
+APP_VERSION = _read_version()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -27,7 +35,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GitBot", version="0.9.0", lifespan=lifespan)
+app = FastAPI(title="GitBot", version=APP_VERSION, lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +44,7 @@ app = FastAPI(title="GitBot", version="0.9.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "admin": settings.admin_enabled}
+    return {"status": "ok", "version": APP_VERSION, "admin": settings.admin_enabled}
 
 
 @app.post("/webhook")
@@ -84,6 +92,7 @@ async def admin_page():
 async def admin_stats():
     _check_admin()
     stats = tracker.get_stats()
+    stats["version"] = APP_VERSION
     stats["config"] = {
         "gitlab_url": settings.gitlab_url,
         "bot_username": settings.bot_username,
