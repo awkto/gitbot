@@ -20,7 +20,7 @@ def post_note_on_issue(project_id: int, issue_iid: int, body: str) -> int:
     project = gl.projects.get(project_id)
     issue = project.issues.get(issue_iid)
     note = issue.notes.create({"body": body})
-    return note.id
+    return note.get_id() or note.attributes.get("id", 0)
 
 
 def update_note_on_issue(project_id: int, issue_iid: int, note_id: int, body: str) -> None:
@@ -39,7 +39,7 @@ def post_note_on_mr(project_id: int, mr_iid: int, body: str) -> int:
     project = gl.projects.get(project_id)
     mr = project.mergerequests.get(mr_iid)
     note = mr.notes.create({"body": body})
-    return note.id
+    return note.get_id() or note.attributes.get("id", 0)
 
 
 def update_note_on_mr(project_id: int, mr_iid: int, note_id: int, body: str) -> None:
