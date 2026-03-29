@@ -125,8 +125,8 @@ async def tool_loop_with_model(
             model=model,
             messages=messages,
             tools=tools,
-            api_base=settings.llm_api_base,
-            api_key=settings.llm_api_key,
+            api_base=settings.get_api_base(),
+            api_key=settings.get_api_key(),
             timeout=120,  # 2 min timeout per call
         )
 
