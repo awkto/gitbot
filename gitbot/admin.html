@@ -13,46 +13,82 @@
   h1 .dot.error { background: #f85149; }
   h2 { font-size: 1.1rem; color: #8b949e; margin: 1.5rem 0 0.5rem; border-bottom: 1px solid #21262d; padding-bottom: 0.3rem; }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; }
-  .card .label { color: #8b949e; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  .card .value { font-size: 1.8rem; font-weight: 600; color: #e6edf3; margin-top: 0.25rem; }
-  .card .sub { font-size: 0.75rem; color: #8b949e; margin-top: 0.25rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin-bottom: 1rem; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.75rem; }
+  .card .label { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .card .value { font-size: 1.6rem; font-weight: 600; color: #e6edf3; margin-top: 0.2rem; }
+  .card .sub { font-size: 0.7rem; color: #8b949e; margin-top: 0.2rem; }
 
-  .config-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
-  .config-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.5rem 0.75rem; font-size: 0.85rem; }
-  .config-item .label { color: #8b949e; font-size: 0.7rem; }
-  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 500; }
+  .config-row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+  .config-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.4rem 0.6rem; font-size: 0.8rem; }
+  .config-item .label { color: #8b949e; font-size: 0.65rem; }
+  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.7rem; font-weight: 500; }
   .badge.ok { background: #238636; color: #fff; }
   .badge.warn { background: #9e6a03; color: #fff; }
   .badge.error { background: #da3633; color: #fff; }
+  .badge.running { background: #1f6feb; color: #fff; }
 
-  .btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
+  .btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 0.3rem 0.6rem; border-radius: 6px; cursor: pointer; font-size: 0.75rem; }
   .btn:hover { background: #30363d; }
   .btn.primary { background: #238636; border-color: #2ea043; }
 
-  /* Active workflows */
-  .workflow { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.75rem; margin-bottom: 0.5rem; }
-  .workflow .header { display: flex; justify-content: space-between; align-items: center; }
-  .workflow .target { font-weight: 600; color: #e6edf3; }
-  .workflow .meta { color: #8b949e; font-size: 0.8rem; }
-  .workflow .progress { margin-top: 0.5rem; }
-  .progress-bar { background: #21262d; height: 6px; border-radius: 3px; overflow: hidden; }
-  .progress-fill { background: #238636; height: 100%; transition: width 0.3s; }
+  /* Workflow table */
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  th { text-align: left; color: #8b949e; font-weight: 500; padding: 0.4rem 0.5rem; border-bottom: 1px solid #30363d; }
+  td { padding: 0.4rem 0.5rem; border-bottom: 1px solid #21262d; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover { background: #161b22; }
+  tr.selected { background: #1c2333; border-left: 3px solid #1f6feb; }
+
+  /* Workflow detail panel */
+  .detail-panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; margin-bottom: 1rem; overflow: hidden; }
+  .detail-header { padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #21262d; }
+  .detail-header h3 { font-size: 1rem; color: #e6edf3; }
+  .detail-body { padding: 0.75rem 1rem; }
+  .detail-meta { display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.8rem; color: #8b949e; margin-bottom: 0.75rem; }
+  .detail-meta span { display: flex; align-items: center; gap: 0.3rem; }
+
+  /* Phase timeline */
+  .phases { display: flex; gap: 0.25rem; margin-bottom: 0.75rem; }
+  .phase { padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.7rem; font-weight: 500; text-transform: uppercase; }
+  .phase.done { background: #238636; color: #fff; }
+  .phase.active { background: #1f6feb; color: #fff; animation: pulse 1.5s infinite; }
+  .phase.pending { background: #21262d; color: #484f58; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+  /* Steps */
+  .step { border: 1px solid #21262d; border-radius: 6px; margin-bottom: 0.5rem; overflow: hidden; }
+  .step-header { padding: 0.5rem 0.75rem; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+  .step-header:hover { background: #1c2333; }
+  .step-header .step-title { font-size: 0.8rem; font-weight: 500; }
+  .step-header .step-meta { font-size: 0.7rem; color: #8b949e; display: flex; gap: 0.75rem; align-items: center; }
+  .step-body { display: none; padding: 0.5rem 0.75rem; border-top: 1px solid #21262d; background: #0d1117; font-size: 0.75rem; }
+  .step-body.open { display: block; }
+  .step.completed .step-header { border-left: 3px solid #238636; }
+  .step.running .step-header { border-left: 3px solid #1f6feb; }
+  .step.failed .step-header { border-left: 3px solid #da3633; }
+
+  /* Actions within a step */
+  .action { padding: 0.3rem 0; border-bottom: 1px solid #161b22; font-family: monospace; font-size: 0.7rem; }
+  .action:last-child { border-bottom: none; }
+  .action .tool-name { color: #d2a8ff; font-weight: 500; }
+  .action .result { color: #8b949e; margin-left: 1rem; display: block; white-space: pre-wrap; word-break: break-all; }
+  .action.error .tool-name { color: #f85149; }
 
   /* Event log */
-  .events { max-height: 400px; overflow-y: auto; }
-  .event { padding: 0.3rem 0.5rem; font-size: 0.8rem; font-family: monospace; border-bottom: 1px solid #21262d; }
-  .event .ts { color: #484f58; }
+  .events { max-height: 300px; overflow-y: auto; }
+  .event { padding: 0.25rem 0.5rem; font-size: 0.75rem; font-family: monospace; border-bottom: 1px solid #21262d; }
+  .event .ts { color: #484f58; margin-right: 0.5rem; }
   .event.warn { border-left: 3px solid #9e6a03; }
   .event.error { border-left: 3px solid #da3633; }
   .event.info { border-left: 3px solid #388bfd; }
 
-  /* Workflow history */
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th { text-align: left; color: #8b949e; font-weight: 500; padding: 0.5rem; border-bottom: 1px solid #30363d; }
-  td { padding: 0.5rem; border-bottom: 1px solid #21262d; }
-  tr:hover { background: #161b22; }
+  /* Setup form */
+  #setupForm { display:none;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:1rem;margin-bottom:1rem; }
+  #setupForm input, #setupForm select { width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px;font-size:0.8rem; }
+  #setupForm label { font-size: 0.7rem; color: #8b949e; }
+
+  .hidden { display: none; }
 </style>
 </head>
 <body>
@@ -60,31 +96,31 @@
   <h1><span class="dot" id="statusDot"></span> GitBot Admin <span id="versionBadge" style="font-size:0.7rem;color:#8b949e"></span></h1>
 
   <!-- Setup banner -->
-  <div id="setupBanner" style="display:none;background:#1c1612;border:1px solid #9e6a03;border-radius:6px;padding:1rem;margin-bottom:1rem">
-    <strong>Setup Required</strong> — Configure GitLab and LLM settings below to get started.
+  <div id="setupBanner" class="hidden" style="background:#1c1612;border:1px solid #9e6a03;border-radius:6px;padding:1rem;margin-bottom:1rem">
+    <strong>Setup Required</strong> — Configure GitLab and LLM settings below.
   </div>
 
-  <!-- Config -->
+  <!-- Config bar -->
   <div class="config-row" id="configRow"></div>
   <div style="margin-bottom:0.5rem">
     <button class="btn" onclick="testGitlab()">Test GitLab</button>
     <button class="btn" onclick="testLlm()">Test LLM</button>
     <button class="btn" onclick="toggleSetup()">Configure</button>
-    <span id="testResult" style="margin-left:0.5rem;font-size:0.85rem"></span>
+    <span id="testResult" style="margin-left:0.5rem;font-size:0.8rem"></span>
   </div>
 
-  <!-- Config form (hidden by default) -->
-  <div id="setupForm" style="display:none;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:1rem;margin-bottom:1rem">
+  <!-- Config form (hidden) -->
+  <div id="setupForm">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem">
-      <label class="label">GitLab URL<br><input id="cfgGitlabUrl" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="https://gitlab.example.com"></label>
-      <label class="label">GitLab Token<br><input id="cfgGitlabToken" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="glpat-xxx"></label>
-      <label class="label">Bot Username<br><input id="cfgBotUsername" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="gitbot"></label>
-      <label class="label">Anthropic Key<br><input id="cfgAnthropicKey" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="sk-ant-..."></label>
-      <label class="label">Gemini Key<br><input id="cfgGeminiKey" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="AIza..."></label>
-      <label class="label">OpenAI Key<br><input id="cfgOpenaiKey" type="password" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="sk-..."></label>
-      <label class="label">Ollama / vLLM URL<br><input id="cfgOllamaUrl" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px" placeholder="http://localhost:11434"></label>
-      <label class="label">Active Provider<br>
-        <select id="cfgLlmFamily" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px">
+      <label>GitLab URL<br><input id="cfgGitlabUrl" placeholder="https://gitlab.example.com"></label>
+      <label>GitLab Token<br><input id="cfgGitlabToken" type="password" placeholder="glpat-xxx"></label>
+      <label>Bot Username<br><input id="cfgBotUsername" placeholder="gitbot"></label>
+      <label>Anthropic Key<br><input id="cfgAnthropicKey" type="password" placeholder="sk-ant-..."></label>
+      <label>Gemini Key<br><input id="cfgGeminiKey" type="password" placeholder="AIza..."></label>
+      <label>OpenAI Key<br><input id="cfgOpenaiKey" type="password" placeholder="sk-..."></label>
+      <label>Ollama / vLLM URL<br><input id="cfgOllamaUrl" placeholder="http://localhost:11434"></label>
+      <label>Active Provider<br>
+        <select id="cfgLlmFamily">
           <option value="">First available key</option>
           <option value="anthropic">Anthropic (Claude)</option>
           <option value="gemini">Google Gemini</option>
@@ -92,194 +128,213 @@
           <option value="ollama">Ollama / vLLM</option>
         </select>
       </label>
-      <label class="label">SSL Verify<br>
-        <select id="cfgSslVerify" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px">
-          <option value="true">Yes</option>
-          <option value="false">No (self-signed certs)</option>
-        </select>
+      <label>SSL Verify<br>
+        <select id="cfgSslVerify"><option value="true">Yes</option><option value="false">No (self-signed)</option></select>
       </label>
     </div>
     <div style="margin-top:0.75rem">
       <button class="btn primary" onclick="saveConfig()">Save &amp; Restart Required</button>
-      <span id="saveResult" style="margin-left:0.5rem;font-size:0.85rem"></span>
+      <span id="saveResult" style="margin-left:0.5rem;font-size:0.8rem"></span>
     </div>
   </div>
 
   <!-- Stats -->
   <div class="grid" id="statsGrid"></div>
 
-  <!-- Active Workflows -->
-  <h2>Active Workflows</h2>
-  <div id="currentWorkflows"><span class="meta">None</span></div>
-
-  <!-- Workflow detail panel (hidden until clicked) -->
-  <div id="workflowDetail" style="display:none;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:1rem;margin-bottom:1rem">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <h2 style="margin:0;border:none;padding:0" id="detailTitle">Workflow</h2>
+  <!-- Workflow detail panel (shown when a workflow is selected) -->
+  <div id="workflowDetail" class="detail-panel hidden">
+    <div class="detail-header">
+      <h3 id="detailTitle">Workflow</h3>
       <button class="btn" onclick="closeDetail()">Close</button>
     </div>
-    <div id="detailMeta" class="meta" style="margin:0.5rem 0"></div>
-    <div class="progress" style="margin-bottom:0.5rem"><div class="progress-bar"><div class="progress-fill" id="detailProgress" style="width:0%"></div></div></div>
-    <div class="events" id="detailEvents" style="max-height:300px"></div>
+    <div class="detail-body">
+      <div class="detail-meta" id="detailMeta"></div>
+      <div id="detailPhases" class="phases"></div>
+      <div id="detailGather" class="hidden" style="background:#0d1117;border:1px solid #21262d;border-radius:4px;padding:0.5rem;margin-bottom:0.75rem;font-size:0.75rem;color:#8b949e"></div>
+      <div id="detailSteps"></div>
+      <h2 style="font-size:0.85rem">Workflow Events</h2>
+      <div class="events" id="detailEvents"></div>
+    </div>
   </div>
 
-  <!-- Event Log -->
-  <h2>Activity Feed <button class="btn" onclick="clearEvents()" style="float:right;font-size:0.7rem">Clear</button></h2>
-  <div class="events" id="eventLog"></div>
-
-  <!-- History -->
-  <h2>Recent Workflows</h2>
+  <!-- Workflows table -->
+  <h2>Workflows <span id="wfCount" style="font-size:0.75rem;color:#484f58"></span></h2>
   <table>
-    <thead><tr><th>Target</th><th>Trigger</th><th>Steps</th><th>Tools</th><th>Models</th><th>Time</th><th>Status</th><th></th></tr></thead>
-    <tbody id="workflowHistory"></tbody>
+    <thead><tr><th>Target</th><th>Project</th><th>Trigger</th><th>Steps</th><th>Time</th><th>Status</th></tr></thead>
+    <tbody id="workflowTable"></tbody>
   </table>
+
+  <!-- Event log -->
+  <h2>Activity Feed</h2>
+  <div class="events" id="eventLog"></div>
 </div>
 
 <script>
 const API = '/admin/api';
 let allEvents = [];
+let allWorkflows = [];
+let selectedWf = null;
 
-function fmt(ts) {
-  return new Date(ts * 1000).toLocaleTimeString();
-}
+function fmt(ts) { return new Date(ts * 1000).toLocaleTimeString(); }
+function fmtDate(ts) { return new Date(ts * 1000).toLocaleString(); }
 function dur(s) {
-  if (s < 60) return `${s}s`;
+  if (s < 60) return `${Math.round(s)}s`;
   if (s < 3600) return `${Math.floor(s/60)}m ${Math.round(s%60)}s`;
   return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+}
+
+function statusBadge(s) {
+  const cls = s === 'completed' ? 'ok' : s === 'running' ? 'running' : 'error';
+  return `<span class="badge ${cls}">${s}</span>`;
 }
 
 async function fetchStats() {
   try {
     const r = await fetch(`${API}/stats`);
     const d = await r.json();
-
     document.getElementById('statusDot').className = 'dot' + (d.config.gitlab_connected && d.config.llm_configured ? '' : ' error');
     document.getElementById('versionBadge').textContent = d.version ? `v${d.version}` : '';
-
-    // Show setup banner if needed
     const banner = document.getElementById('setupBanner');
     const form = document.getElementById('setupForm');
-    if (d.config.setup_needed) {
-      banner.style.display = 'block';
-      form.style.display = 'block';
-    } else {
-      banner.style.display = 'none';
-    }
+    if (d.config.setup_needed) { banner.classList.remove('hidden'); form.classList.remove('hidden'); }
+    else { banner.classList.add('hidden'); }
 
     document.getElementById('configRow').innerHTML = `
-      <div class="config-item"><div class="label">GitLab</div>${d.config.gitlab_url}
-        <span class="badge ${d.config.gitlab_connected ? 'ok' : 'error'}">${d.config.gitlab_connected ? 'connected' : 'no token'}</span></div>
-      <div class="config-item"><div class="label">Bot User</div>@${d.config.bot_username}</div>
-      <div class="config-item"><div class="label">LLM</div>${d.config.llm_family}
-        <span class="badge ${d.config.llm_configured ? 'ok' : 'error'}">${d.config.llm_configured ? 'ready' : 'no key'}</span></div>
-    `;
+      <div class="config-item"><div class="label">GitLab</div>${d.config.gitlab_url} <span class="badge ${d.config.gitlab_connected?'ok':'error'}">${d.config.gitlab_connected?'connected':'no token'}</span></div>
+      <div class="config-item"><div class="label">Bot</div>@${d.config.bot_username}</div>
+      <div class="config-item"><div class="label">LLM</div>${d.config.llm_family} <span class="badge ${d.config.llm_configured?'ok':'error'}">${d.config.llm_configured?'ready':'no key'}</span></div>`;
 
     document.getElementById('statsGrid').innerHTML = `
       <div class="card"><div class="label">Uptime</div><div class="value">${dur(d.uptime_seconds)}</div></div>
       <div class="card"><div class="label">Webhooks</div><div class="value">${d.webhooks_received}</div><div class="sub">${d.webhooks_skipped} skipped</div></div>
-      <div class="card"><div class="label">Workflows</div><div class="value">${d.workflows_completed}</div><div class="sub">${d.workflows_failed} failed, ${d.active_workflows} active</div></div>
-      <div class="card"><div class="label">Tool Calls</div><div class="value">${d.total_tool_calls}</div><div class="sub">${d.total_escalations} escalations</div></div>
-    `;
-  } catch(e) { console.error(e); }
-}
-
-async function fetchCurrent() {
-  try {
-    const r = await fetch(`${API}/current`);
-    const wfs = await r.json();
-    const el = document.getElementById('currentWorkflows');
-    if (!wfs.length) { el.innerHTML = '<span class="meta">No active workflows</span>'; return; }
-    el.innerHTML = wfs.map(w => {
-      const pct = w.plan_steps ? Math.round(w.completed_steps / w.plan_steps * 100) : 0;
-      return `<div class="workflow" style="cursor:pointer" onclick="selectWorkflow('${w.id}')">
-        <div class="header">
-          <span class="target">${w.target}</span>
-          <span class="meta">${w.project} &middot; ${dur(w.elapsed_seconds)}</span>
-        </div>
-        <div class="meta">Step ${w.completed_steps}/${w.plan_steps} &middot; ${w.tool_calls} tools &middot; ${w.models_used.join(', ')}</div>
-        <div class="progress"><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div></div>
-      </div>`;
-    }).join('');
+      <div class="card"><div class="label">Workflows</div><div class="value">${d.workflows_completed + d.workflows_failed}</div><div class="sub">${d.workflows_completed} ok, ${d.workflows_failed} failed, ${d.active_workflows} active</div></div>
+      <div class="card"><div class="label">Escalations</div><div class="value">${d.total_escalations}</div></div>`;
   } catch(e) {}
 }
 
-async function fetchEvents() {
+async function fetchAll() {
   try {
-    const r = await fetch(`${API}/events?limit=100`);
-    allEvents = await r.json();
-    renderEvents();
+    const [evR, wfR, curR] = await Promise.all([
+      fetch(`${API}/events?limit=200`),
+      fetch(`${API}/workflows?limit=50`),
+      fetch(`${API}/current`),
+    ]);
+    allEvents = await evR.json();
+    const history = await wfR.json();
+    const current = await curR.json();
+    // Merge: current first (running), then history (deduped)
+    const ids = new Set(current.map(w => w.id));
+    allWorkflows = [...current, ...history.filter(w => !ids.has(w.id))];
+    renderWorkflowTable();
+    renderEventLog();
+    if (selectedWf) renderDetail();
   } catch(e) {}
 }
 
-function renderEvents() {
-  document.getElementById('eventLog').innerHTML = allEvents.map(e =>
-    `<div class="event ${e.level}"><span class="ts">${fmt(e.timestamp)}</span> ${e.message}</div>`
+function renderWorkflowTable() {
+  const el = document.getElementById('workflowTable');
+  document.getElementById('wfCount').textContent = `(${allWorkflows.length})`;
+  el.innerHTML = allWorkflows.map(w => `
+    <tr class="clickable ${selectedWf === w.id ? 'selected' : ''}" onclick="selectWorkflow('${w.id}')">
+      <td><strong>${w.target}</strong></td>
+      <td style="color:#8b949e">${w.project}</td>
+      <td>${w.trigger}</td>
+      <td>${w.completed_steps}/${w.plan_steps}</td>
+      <td>${dur(w.elapsed_seconds)}</td>
+      <td>${statusBadge(w.status)}${w.escalations ? ' <span style="font-size:0.65rem;color:#9e6a03">+' + w.escalations + ' esc</span>' : ''}</td>
+    </tr>
+  `).join('');
+}
+
+function renderEventLog() {
+  document.getElementById('eventLog').innerHTML = allEvents.slice(0, 50).map(e =>
+    `<div class="event ${e.level}"><span class="ts">${fmt(e.timestamp)}</span>${e.workflow_id ? `<span style="color:#484f58">[${e.workflow_id}]</span> ` : ''}${e.message}</div>`
   ).join('');
 }
 
-function clearEvents() { allEvents = []; renderEvents(); }
-
-let selectedWorkflow = null;
-
-async function fetchWorkflows() {
-  try {
-    const r = await fetch(`${API}/workflows?limit=20`);
-    const wfs = await r.json();
-    document.getElementById('workflowHistory').innerHTML = wfs.map(w =>
-      `<tr style="cursor:pointer" onclick="selectWorkflow('${w.id}')">
-        <td>${w.target}</td>
-        <td>${w.trigger}</td>
-        <td>${w.completed_steps}/${w.plan_steps}</td>
-        <td>${w.tool_calls}</td>
-        <td>${w.models_used.join(', ') || '-'}</td>
-        <td>${dur(w.elapsed_seconds)}</td>
-        <td><span class="badge ${w.status === 'completed' ? 'ok' : w.status === 'running' ? 'warn' : 'error'}">${w.status}</span></td>
-        <td style="font-size:0.7rem;color:#484f58">${w.id}</td>
-      </tr>`
-    ).join('');
-
-    // Update detail panel if one is selected
-    if (selectedWorkflow) {
-      const wf = wfs.find(w => w.id === selectedWorkflow);
-      if (wf) updateDetailPanel(wf);
-    }
-  } catch(e) {}
-}
-
 function selectWorkflow(id) {
-  selectedWorkflow = id;
-  document.getElementById('workflowDetail').style.display = 'block';
-  // Filter events for this workflow
-  updateDetailEvents();
-  // Scroll to it
-  document.getElementById('workflowDetail').scrollIntoView({behavior:'smooth'});
+  selectedWf = id;
+  document.getElementById('workflowDetail').classList.remove('hidden');
+  renderDetail();
+  renderWorkflowTable();
+  document.getElementById('workflowDetail').scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 function closeDetail() {
-  selectedWorkflow = null;
-  document.getElementById('workflowDetail').style.display = 'none';
+  selectedWf = null;
+  document.getElementById('workflowDetail').classList.add('hidden');
+  renderWorkflowTable();
 }
 
-function updateDetailPanel(wf) {
-  document.getElementById('detailTitle').textContent = `${wf.target} — ${wf.trigger}`;
-  const pct = wf.plan_steps ? Math.round(wf.completed_steps / wf.plan_steps * 100) : 0;
-  document.getElementById('detailProgress').style.width = `${pct}%`;
-  document.getElementById('detailMeta').innerHTML =
-    `<span class="badge ${wf.status === 'completed' ? 'ok' : wf.status === 'running' ? 'warn' : 'error'}">${wf.status}</span> ` +
-    `Steps: ${wf.completed_steps}/${wf.plan_steps} | Tools: ${wf.tool_calls} | ` +
-    `Models: ${wf.models_used.join(', ') || '-'} | ${dur(wf.elapsed_seconds)} | ` +
-    `${wf.escalations ? wf.escalations + ' escalation(s)' : ''}`;
-  updateDetailEvents();
-}
+function renderDetail() {
+  const wf = allWorkflows.find(w => w.id === selectedWf);
+  if (!wf) return;
 
-function updateDetailEvents() {
-  if (!selectedWorkflow) return;
-  const filtered = allEvents.filter(e => e.workflow_id === selectedWorkflow);
-  document.getElementById('detailEvents').innerHTML = filtered.length
-    ? filtered.map(e =>
-        `<div class="event ${e.level}"><span class="ts">${fmt(e.timestamp)}</span> ${e.message}</div>`
-      ).join('')
-    : '<div class="meta" style="padding:0.5rem">No events for this workflow</div>';
+  document.getElementById('detailTitle').textContent = `${wf.target}`;
+  document.getElementById('detailMeta').innerHTML = `
+    ${statusBadge(wf.status)}
+    <span>Project: <strong>${wf.project}</strong></span>
+    <span>Trigger: ${wf.trigger}</span>
+    <span>Started: ${fmtDate(wf.started)}</span>
+    <span>Duration: ${dur(wf.elapsed_seconds)}</span>
+    <span>Steps: ${wf.completed_steps}/${wf.plan_steps}</span>
+    <span>Models: ${(wf.models_used||[]).join(', ') || '-'}</span>
+    ${wf.error ? `<span style="color:#f85149">Error: ${wf.error.substring(0,80)}</span>` : ''}
+  `;
+
+  // Phase timeline
+  const phases = wf.phases || [];
+  const allPhases = ['gather', 'plan', 'execute'];
+  const currentPhaseIdx = phases.length - 1;
+  document.getElementById('detailPhases').innerHTML = allPhases.map((p, i) => {
+    const cls = i < phases.length ? (wf.status === 'running' && i === currentPhaseIdx ? 'active' : 'done') : 'pending';
+    return `<div class="phase ${cls}">${p}</div>`;
+  }).join('');
+
+  // Gather summary
+  const gatherEl = document.getElementById('detailGather');
+  if (wf.gather_summary) {
+    gatherEl.classList.remove('hidden');
+    gatherEl.innerHTML = `<strong>Gather summary:</strong> ${wf.gather_summary}`;
+  } else {
+    gatherEl.classList.add('hidden');
+  }
+
+  // Steps
+  const steps = wf.steps || [];
+  document.getElementById('detailSteps').innerHTML = steps.length ? steps.map(s => `
+    <div class="step ${s.status}">
+      <div class="step-header" onclick="this.nextElementSibling.classList.toggle('open')">
+        <span class="step-title">
+          <span style="color:#484f58">${s.number}.</span>
+          ${s.description.substring(0, 80)}${s.description.length > 80 ? '...' : ''}
+          ${s.escalated ? '<span class="badge warn">escalated</span>' : ''}
+        </span>
+        <span class="step-meta">
+          <span class="badge ${s.status === 'completed' ? 'ok' : s.status === 'running' ? 'running' : 'error'}">${s.status}</span>
+          <span>${s.tier}</span>
+          <span style="color:#d2a8ff">${s.model.split('/').pop()}</span>
+          <span>${s.tools_count} tools</span>
+          <span>${dur(s.elapsed_seconds)}</span>
+        </span>
+      </div>
+      <div class="step-body">
+        <div style="margin-bottom:0.5rem;color:#8b949e">${s.description}</div>
+        ${s.actions.length ? s.actions.map(a => `
+          <div class="action ${a.error ? 'error' : ''}">
+            <span class="tool-name">${a.error ? 'FAILED ' : ''}${a.tool}</span>
+            <span class="result">${a.result_preview || '(no output)'}</span>
+          </div>
+        `).join('') : '<div style="color:#484f58">No actions recorded</div>'}
+      </div>
+    </div>
+  `).join('') : '<div style="color:#484f58;font-size:0.8rem;padding:0.5rem">No step details (workflow may predate step tracking)</div>';
+
+  // Workflow events
+  const wfEvents = allEvents.filter(e => e.workflow_id === selectedWf);
+  document.getElementById('detailEvents').innerHTML = wfEvents.length
+    ? wfEvents.map(e => `<div class="event ${e.level}"><span class="ts">${fmt(e.timestamp)}</span> ${e.message}</div>`).join('')
+    : '<div style="color:#484f58;padding:0.5rem">No events</div>';
 }
 
 async function testGitlab() {
@@ -288,9 +343,7 @@ async function testGitlab() {
   try {
     const r = await fetch(`${API}/test-gitlab`, {method:'POST'});
     const d = await r.json();
-    el.innerHTML = d.status === 'ok'
-      ? `<span class="badge ok">GitLab OK: @${d.user}</span>`
-      : `<span class="badge error">GitLab: ${d.error}</span>`;
+    el.innerHTML = d.status === 'ok' ? `<span class="badge ok">GitLab OK: @${d.user}</span>` : `<span class="badge error">${d.error}</span>`;
   } catch(e) { el.innerHTML = `<span class="badge error">${e}</span>`; }
 }
 
@@ -300,15 +353,12 @@ async function testLlm() {
   try {
     const r = await fetch(`${API}/test-llm`, {method:'POST'});
     const d = await r.json();
-    el.innerHTML = d.status === 'ok'
-      ? `<span class="badge ok">LLM OK (${d.model})</span>`
-      : `<span class="badge error">LLM: ${d.error}</span>`;
+    el.innerHTML = d.status === 'ok' ? `<span class="badge ok">LLM OK (${d.model})</span>` : `<span class="badge error">${d.error}</span>`;
   } catch(e) { el.innerHTML = `<span class="badge error">${e}</span>`; }
 }
 
 function toggleSetup() {
-  const f = document.getElementById('setupForm');
-  f.style.display = f.style.display === 'none' ? 'block' : 'none';
+  document.getElementById('setupForm').classList.toggle('hidden');
 }
 
 async function saveConfig() {
@@ -325,24 +375,15 @@ async function saveConfig() {
     llm_family: document.getElementById('cfgLlmFamily').value,
     gitlab_ssl_verify: document.getElementById('cfgSslVerify').value,
   };
-  // Remove empty values
   Object.keys(data).forEach(k => { if (!data[k]) delete data[k]; });
   try {
     const r = await fetch(`${API}/save-config`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
     const d = await r.json();
-    el.innerHTML = d.status === 'ok'
-      ? `<span class="badge ok">${d.message}</span>`
-      : `<span class="badge error">${d.error}</span>`;
+    el.innerHTML = d.status === 'ok' ? `<span class="badge ok">${d.message}</span>` : `<span class="badge error">${d.error}</span>`;
   } catch(e) { el.innerHTML = `<span class="badge error">${e}</span>`; }
 }
 
-// Poll
-function refresh() {
-  fetchStats();
-  fetchCurrent();
-  fetchEvents();
-  fetchWorkflows();
-}
+function refresh() { fetchStats(); fetchAll(); }
 refresh();
 setInterval(refresh, 3000);
 </script>

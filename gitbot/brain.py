@@ -174,6 +174,7 @@ async def decide_and_act(sit: Situation) -> None:
 
     try:
         # Phase 1: Gather context (Haiku)
+        tracker.add_phase(wf_id, "gather")
         tracker.log("info", "Gathering context...", wf_id)
         summary = await _gather_context(sit)
         if summary is None:
@@ -182,9 +183,15 @@ async def decide_and_act(sit: Situation) -> None:
             tracker.finish_workflow(wf_id, "completed")
             return
 
+        tracker.set_gather_summary(wf_id, summary)
+
         # Phase 2: Plan (Sonnet) — break into steps with model tiers
+        tracker.add_phase(wf_id, "plan")
         tracker.log("info", "Planning...", wf_id)
         plan = await _make_plan(sit, summary)
+
+        # Phase 3: Execute
+        tracker.add_phase(wf_id, "execute")
 
         if not plan or not plan.get("steps"):
             _update_placeholder(sit, placeholder_id,
@@ -192,7 +199,10 @@ async def decide_and_act(sit: Situation) -> None:
             _set_working_label(sit)
 
             tracker.set_plan(wf_id, 1)
-            result, _actions = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS)
+            model_str = _resolve_model_for_tier(Tier.MID)
+            tracker.start_step(wf_id, 1, summary[:100], "mid", model_str, len(TOOL_SCHEMAS))
+            result, actions = await _execute_step(sit, summary, Tier.MID, TOOL_SCHEMAS)
+            tracker.finish_step(wf_id, 1, actions=actions)
             tracker.step_completed(wf_id, settings.get_llm_family())
             _update_placeholder(sit, placeholder_id, result)
             _clear_labels(sit)
@@ -216,9 +226,12 @@ async def decide_and_act(sit: Situation) -> None:
                 tier = Tier(step.get("tier", "cheap"))
                 desc = step.get("description", f"Step {i+1}")
                 step_tools = step.get("tools_needed")
+                model_str = _resolve_model_for_tier(tier)
+                tools_for_step = get_tools_for_step(step_tools) if step_tools else TOOL_SCHEMAS
                 log.info("Executing step %d/%d [%s]: %s",
                          i + 1, num_steps, tier, desc[:80])
                 tracker.log("info", f"Step {i+1}/{num_steps} [{tier}]: {desc[:60]}", wf_id)
+                tracker.start_step(wf_id, i + 1, desc, tier, model_str, len(tools_for_step))
 
                 result = await _execute_step_with_escalation(
                     sit, desc, tier, TOOL_SCHEMAS, id_registry, i + 1, num_steps,
@@ -368,6 +381,8 @@ async def _execute_step_with_escalation(
         sit, step_description, tier, tools, id_registry, tools_needed=tools_needed,
     )
 
+    wf_id = sit._wf_id if hasattr(sit, '_wf_id') else ""
+
     failure_reason = _step_failure_reason(actions)
     if failure_reason:
         next_tier = _TIER_ESCALATION.get(tier)
@@ -385,7 +400,8 @@ async def _execute_step_with_escalation(
                 "Step %d/%d failed on %s — escalating to %s (reason: %s)",
                 step_num, total_steps, tier, next_tier, failure_reason,
             )
-            tracker.escalation(sit._wf_id if hasattr(sit, '_wf_id') else "")
+            tracker.escalation(wf_id)
+            tracker.mark_step_escalated(wf_id, step_num)
             tracker.log("warn", f"Step {step_num} failed on {tier}, escalating to {next_tier}: {failure_reason}")
 
             # Give the stronger model structured failure context
@@ -404,6 +420,7 @@ async def _execute_step_with_escalation(
             if retry_failure and next_tier == Tier.STRONG:
                 log.error("Step %d/%d failed even on strong tier: %s", step_num, total_steps, retry_failure)
 
+    tracker.finish_step(wf_id, step_num, actions=actions)
     return summary
 
 

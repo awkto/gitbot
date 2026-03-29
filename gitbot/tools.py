@@ -644,13 +644,14 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_project",
-            "description": "Create a new GitLab project (repository).",
+            "description": "Create a new GitLab project (repository). Use namespace_path (group path like 'gbtest' or 'gbtest/subgroup') to create in a specific group.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
                     "path": {"type": "string", "description": "URL slug (defaults to slugified name)"},
-                    "namespace_id": {"type": "integer", "description": "Group/namespace ID to create in (omit for user namespace)"},
+                    "namespace_id": {"type": "integer", "description": "Group/namespace ID (prefer namespace_path instead)"},
+                    "namespace_path": {"type": "string", "description": "Group path to create in, e.g. 'gbtest' or 'gbtest/weatherapp'"},
                     "description": {"type": "string"},
                     "visibility": {"type": "string", "enum": ["private", "internal", "public"]},
                     "initialize_with_readme": {"type": "boolean"},
@@ -679,13 +680,14 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_group",
-            "description": "Create a new GitLab group or subgroup.",
+            "description": "Create a new GitLab group or subgroup. Use parent_path (e.g. 'gbtest') to create a subgroup under an existing group.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
                     "path": {"type": "string"},
-                    "parent_id": {"type": "integer", "description": "Parent group ID for subgroups (omit for top-level)"},
+                    "parent_id": {"type": "integer", "description": "Parent group ID (prefer parent_path instead)"},
+                    "parent_path": {"type": "string", "description": "Parent group path, e.g. 'gbtest'. Used to create subgroups."},
                     "description": {"type": "string"},
                     "visibility": {"type": "string", "enum": ["private", "internal", "public"]},
                 },
@@ -1229,6 +1231,13 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
             for field in ["path", "namespace_id", "description", "visibility", "initialize_with_readme"]:
                 if args.get(field) is not None:
                     data[field] = args[field]
+            # Resolve namespace_path to namespace_id if provided
+            if args.get("namespace_path") and "namespace_id" not in data:
+                try:
+                    group = gl.groups.get(args["namespace_path"])
+                    data["namespace_id"] = group.id
+                except Exception:
+                    return f"TOOL_ERROR: create_project failed — group '{args['namespace_path']}' not found"
             new_project = gl.projects.create(data)
             return f"Created project: {new_project.path_with_namespace} (id={new_project.id})\nURL: {new_project.web_url}"
 
@@ -1248,6 +1257,13 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
             for field in ["parent_id", "description", "visibility"]:
                 if args.get(field) is not None:
                     data[field] = args[field]
+            # Resolve parent_path to parent_id if provided
+            if args.get("parent_path") and "parent_id" not in data:
+                try:
+                    parent = gl.groups.get(args["parent_path"])
+                    data["parent_id"] = parent.id
+                except Exception:
+                    return f"TOOL_ERROR: create_group failed — parent group '{args['parent_path']}' not found"
             group = gl.groups.create(data)
             return f"Created group: {group.full_path} (id={group.id})\nURL: {group.web_url}"
 

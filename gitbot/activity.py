@@ -32,6 +32,35 @@ class ActivityEvent:
 
 
 @dataclass
+class StepInfo:
+    """Details about a single execution step within a workflow."""
+    number: int
+    description: str
+    tier: str = ""
+    model: str = ""
+    tools_count: int = 0
+    started: float = 0
+    finished: float = 0
+    status: str = "running"  # running, completed, failed
+    escalated: bool = False
+    actions: list[dict] = field(default_factory=list)  # [{tool, result_preview, error}]
+
+    def to_dict(self) -> dict:
+        elapsed = (self.finished or time.time()) - self.started if self.started else 0
+        return {
+            "number": self.number,
+            "description": self.description,
+            "tier": self.tier,
+            "model": self.model,
+            "tools_count": self.tools_count,
+            "elapsed_seconds": round(elapsed, 1),
+            "status": self.status,
+            "escalated": self.escalated,
+            "actions": self.actions,
+        }
+
+
+@dataclass
 class Workflow:
     id: str
     started: float
@@ -46,6 +75,9 @@ class Workflow:
     models_used: list[str] = field(default_factory=list)
     finished: float = 0
     error: str = ""
+    phases: list[str] = field(default_factory=list)  # ["gather", "plan", "execute"]
+    steps: list[StepInfo] = field(default_factory=list)
+    gather_summary: str = ""
 
     def to_dict(self) -> dict:
         elapsed = (self.finished or time.time()) - self.started
@@ -63,6 +95,9 @@ class Workflow:
             "models_used": list(set(self.models_used)),
             "elapsed_seconds": round(elapsed, 1),
             "error": self.error,
+            "phases": self.phases,
+            "steps": [s.to_dict() for s in self.steps],
+            "gather_summary": self.gather_summary[:200] if self.gather_summary else "",
         }
 
 
@@ -130,6 +165,55 @@ class ActivityTracker:
             self._stats["total_tool_calls"] += 1
             if workflow_id in self._current:
                 self._current[workflow_id].tool_calls += 1
+
+    def add_phase(self, workflow_id: str, phase: str):
+        with self._lock:
+            if workflow_id in self._current:
+                self._current[workflow_id].phases.append(phase)
+
+    def set_gather_summary(self, workflow_id: str, summary: str):
+        with self._lock:
+            if workflow_id in self._current:
+                self._current[workflow_id].gather_summary = summary
+
+    def start_step(self, workflow_id: str, number: int, description: str,
+                   tier: str = "", model: str = "", tools_count: int = 0):
+        with self._lock:
+            if workflow_id in self._current:
+                step = StepInfo(
+                    number=number, description=description,
+                    tier=tier, model=model, tools_count=tools_count,
+                    started=time.time(),
+                )
+                self._current[workflow_id].steps.append(step)
+
+    def finish_step(self, workflow_id: str, step_number: int,
+                    status: str = "completed", actions: list[dict] | None = None):
+        with self._lock:
+            if workflow_id in self._current:
+                for step in self._current[workflow_id].steps:
+                    if step.number == step_number:
+                        step.finished = time.time()
+                        step.status = status
+                        if actions:
+                            step.actions = [
+                                {
+                                    "tool": a.get("tool", ""),
+                                    "result_preview": (a.get("result", "") or "")[:150],
+                                    "error": a.get("error", False),
+                                }
+                                for a in actions
+                                if a.get("tool") not in ("_text_response", "_empty_response")
+                            ]
+                        break
+
+    def mark_step_escalated(self, workflow_id: str, step_number: int):
+        with self._lock:
+            if workflow_id in self._current:
+                for step in self._current[workflow_id].steps:
+                    if step.number == step_number:
+                        step.escalated = True
+                        break
 
     def escalation(self, workflow_id: str):
         with self._lock:
