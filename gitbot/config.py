@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     debug_output: bool = False
 
     # LLM timeout per API call in seconds (0 = no timeout)
-    llm_timeout: int = 300
+    llm_timeout: int = 600
 
     # Server
     host: str = "0.0.0.0"
