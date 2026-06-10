@@ -24,9 +24,9 @@ class Family(StrEnum):
 # Default model for each (family, tier). Users can override via config.
 FAMILY_DEFAULTS: dict[Family, dict[Tier, str]] = {
     Family.ANTHROPIC: {
-        Tier.CHEAP: "anthropic/claude-haiku-4-5-20251001",
-        Tier.MID: "anthropic/claude-sonnet-4-20250514",
-        Tier.STRONG: "anthropic/claude-opus-4-20250514",
+        Tier.CHEAP: "anthropic/claude-haiku-4-5",
+        Tier.MID: "anthropic/claude-sonnet-4-6",
+        Tier.STRONG: "anthropic/claude-opus-4-8",
     },
     Family.OPENAI: {
         Tier.CHEAP: "gpt-4o-mini",

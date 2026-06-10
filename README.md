@@ -64,7 +64,7 @@ Mount `/app/data` to persist the SQLite state database across restarts. This sto
 | Provider | Family | Cheap | Mid | Strong |
 |---|---|---|---|---|
 | **Google Gemini** | `gemini` | 2.5 Flash | 2.5 Pro | 2.5 Pro |
-| **Anthropic** | `anthropic` | Haiku 4.5 | Sonnet 4 | Opus 4 |
+| **Anthropic** | `anthropic` | Haiku 4.5 | Sonnet 4.6 | Opus 4.8 |
 | **OpenAI** | `openai` | GPT-4o-mini | GPT-4o | GPT-4o |
 | **Ollama** | `ollama` | Qwen 2.5 7B | Qwen 2.5 32B | Qwen 2.5 32B |
 | **Claude Code CLI** | `claude-code` | CLI | CLI | CLI |
