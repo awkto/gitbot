@@ -114,3 +114,174 @@ async def run_mention(sit: Situation) -> str:
                      getattr(message, "subtype", "?"), cost)
 
     return final_text or "*(no response produced)*"
+
+
+# ---------------------------------------------------------------------------
+# Implement workflow (issue assigned → branch + MR) — github/gitbot#20
+# ---------------------------------------------------------------------------
+
+IMPLEMENT_MAX_TURNS = 60
+
+IMPLEMENT_SYSTEM = """\
+You are GitBot, an AI developer inside a GitLab instance. You have been
+assigned issue #{target_iid} ("{target_title}") in project "{project_name}"
+(ID: {project_id}).
+
+A working clone of the repository is in your current directory. Implement
+what the issue asks for:
+
+1. Read the issue and explore the repo (files, structure, conventions).
+2. Create a branch named exactly `{branch_name}` (`git checkout -b {branch_name}`).
+3. Make the changes with the file tools. Match the existing code style.
+4. Run any quick checks that exist and are cheap (linters, tests) via Bash.
+5. Commit with a clear message and push: `git push -u origin {branch_name}`.
+6. Create a merge request with the `create_merge_request` GitLab tool:
+   source_branch={branch_name}, target the default branch, and include
+   `Closes #{target_iid}` in the description.
+
+Rules:
+- The git remote is already authenticated — plain `git push` works.
+- Branch name MUST be exactly `{branch_name}` — the harness verifies it.
+- Do NOT close the issue, do NOT merge the MR, do NOT commit to the default branch.
+- Do NOT use post_comment for your final summary — your final text response is
+  posted to the issue automatically.
+- If the issue is impossible or too ambiguous to implement, make no commits and
+  explain why in your final response, starting it with the word BLOCKED.
+"""
+
+
+def _clone_repo(project_id: int, workdir: str) -> tuple[str, str]:
+    """Clone the project into workdir/repo. Returns (repo_path, default_branch)."""
+    import subprocess
+
+    from gitbot import gitlab_client as glc
+
+    gl = glc.get_client()
+    project = gl.projects.get(project_id)
+    default_branch = project.default_branch or "main"
+    path_ns = project.path_with_namespace
+
+    base = settings.gitlab_url.split("://", 1)[1].rstrip("/")
+    url = f"https://oauth2:{settings.gitlab_token}@{base}/{path_ns}.git"
+
+    repo_path = os.path.join(workdir, "repo")
+    subprocess.run(
+        ["git", "clone", "--depth", "50", url, repo_path],
+        check=True, capture_output=True, timeout=120,
+    )
+    bot = settings.bot_username
+    for k, v in (("user.name", "GitBot"), ("user.email", f"{bot}@{base}")):
+        subprocess.run(["git", "-C", repo_path, "config", k, v],
+                       check=True, capture_output=True)
+    return repo_path, default_branch
+
+
+def _verify_implement(project_id: int, issue_iid: int, branch_name: str) -> tuple[dict | None, str]:
+    """Structural finish gate: the MR must exist, be open, and contain commits.
+
+    Returns (mr_info, "") on success or (None, reason) on failure.
+    """
+    from gitbot import gitlab_client as glc
+
+    gl = glc.get_client()
+    project = gl.projects.get(project_id)
+
+    mrs = project.mergerequests.list(source_branch=branch_name, state="opened")
+    if not mrs:
+        try:
+            project.branches.get(branch_name)
+            return None, f"branch `{branch_name}` was pushed but no open MR exists for it"
+        except Exception:
+            return None, f"no branch `{branch_name}` and no MR were created"
+
+    mr = mrs[0]
+    commits = list(mr.commits())
+    if not commits:
+        return None, f"MR !{mr.iid} exists but contains no commits"
+
+    return {"iid": mr.iid, "url": mr.web_url, "title": mr.title,
+            "commits": len(commits)}, ""
+
+
+async def run_implement(sit: Situation) -> tuple[str, bool]:
+    """Run the implement workflow: clone → SDK loop → verify.
+
+    Returns (markdown_summary, success). The summary is posted by the caller;
+    success=False means the finish gate failed or the agent reported BLOCKED.
+    """
+    import shutil
+    import tempfile
+
+    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+
+    if settings.anthropic_api_key:
+        os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+
+    branch_name = f"gitbot/issue-{sit.target_iid}"
+    workdir = tempfile.mkdtemp(prefix=f"gitbot-impl-{sit.project_id}-{sit.target_iid}-")
+
+    try:
+        repo_path, default_branch = await asyncio.to_thread(
+            _clone_repo, sit.project_id, workdir
+        )
+    except Exception as e:
+        log.error("Clone failed for project %s: %s", sit.project_id, e)
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (f":x: **Could not clone the repository**: `{str(e)[:200]}`\n\n"
+                "Check that the repo is initialized and the bot has access."), False
+
+    options = ClaudeAgentOptions(
+        system_prompt=IMPLEMENT_SYSTEM.format(
+            target_iid=sit.target_iid,
+            target_title=sit.target_title,
+            project_name=sit.project_name,
+            project_id=sit.project_id,
+            branch_name=branch_name,
+        ),
+        model="claude-sonnet-4-6",
+        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
+        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash",
+                       "mcp__gitlab__*", "WebSearch", "WebFetch"],
+        permission_mode="dontAsk",
+        max_turns=IMPLEMENT_MAX_TURNS,
+        setting_sources=[],
+        cwd=repo_path,
+    )
+
+    prompt = (
+        f"Issue #{sit.target_iid}: {sit.target_title}\n\n"
+        f"{sit.target_description or '(no description)'}\n\n"
+        f"The repository default branch is `{default_branch}`."
+    )
+
+    log.info("SDK engine: implement workflow start (Issue #%s, branch=%s)",
+             sit.target_iid, branch_name)
+
+    final_text = ""
+    try:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, ResultMessage):
+                final_text = message.result or ""
+                log.info("SDK engine: implement loop done (subtype=%s, cost=%s)",
+                         getattr(message, "subtype", "?"),
+                         getattr(message, "total_cost_usd", None))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    if final_text.strip().startswith("BLOCKED"):
+        return (f":no_entry: **GitBot could not implement this issue.**\n\n"
+                f"{final_text.strip()[7:].strip()}"), False
+
+    # Structural finish gate — never report success the API can't confirm
+    mr_info, reason = await asyncio.to_thread(
+        _verify_implement, sit.project_id, sit.target_iid, branch_name
+    )
+    if mr_info is None:
+        log.warning("Implement gate failed for Issue #%s: %s", sit.target_iid, reason)
+        return (f":warning: **GitBot finished but verification failed**: {reason}.\n\n"
+                f"Agent's report:\n\n{final_text}"), False
+
+    return (f":white_check_mark: **Implemented in MR !{mr_info['iid']}** — "
+            f"[{mr_info['title']}]({mr_info['url']}) "
+            f"({mr_info['commits']} commit{'s' if mr_info['commits'] != 1 else ''})\n\n"
+            f"{final_text}"), True

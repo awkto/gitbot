@@ -173,20 +173,37 @@ async def decide_and_act(sit: Situation) -> None:
     placeholder_id = _post_placeholder(sit)
 
     try:
-        # SDK engine spike (#19): mention/respond workflow through a single
-        # Claude Agent SDK loop. Other workflows still use the legacy brain.
-        if settings.engine == "sdk" and sit.trigger in ("mentioned", "comment"):
-            from gitbot import engine_sdk
-            tracker.add_phase(wf_id, "agent")
-            tracker.log("info", "Running SDK agent loop...", wf_id)
-            _set_working_label(sit)
-            result = await engine_sdk.run_mention(sit)
-            _update_placeholder(sit, placeholder_id, result)
-            _clear_labels(sit)
-            tracker.log("info", f"Completed (sdk): {target_str}", wf_id)
-            tracker.finish_workflow(wf_id, "completed")
-            state.complete_work_item(work_id)
-            return
+        # SDK engine (#19/#20): mention and implement workflows through a
+        # single Claude Agent SDK loop. Other workflows still use the legacy brain.
+        if settings.engine == "sdk":
+            sdk_result: str | None = None
+            sdk_ok = True
+
+            if sit.trigger in ("mentioned", "comment"):
+                from gitbot import engine_sdk
+                tracker.add_phase(wf_id, "agent")
+                tracker.log("info", "Running SDK agent loop (mention)...", wf_id)
+                _set_working_label(sit)
+                sdk_result = await engine_sdk.run_mention(sit)
+
+            elif sit.target_type == "Issue" and sit.trigger == "assigned":
+                from gitbot import engine_sdk
+                tracker.add_phase(wf_id, "agent")
+                tracker.log("info", "Running SDK agent loop (implement)...", wf_id)
+                _set_working_label(sit)
+                sdk_result, sdk_ok = await engine_sdk.run_implement(sit)
+
+            if sdk_result is not None:
+                _update_placeholder(sit, placeholder_id, sdk_result)
+                _clear_labels(sit)
+                status = "completed" if sdk_ok else "failed"
+                tracker.log("info", f"Completed (sdk, {status}): {target_str}", wf_id)
+                tracker.finish_workflow(wf_id, status)
+                if sdk_ok:
+                    state.complete_work_item(work_id)
+                else:
+                    state.fail_work_item(work_id)
+                return
 
         # Phase 1: Gather context (Haiku)
         tracker.add_phase(wf_id, "gather")
