@@ -120,6 +120,7 @@ async def _replay_todo(
     sit.target_type = target_type
     sit.target_iid = target_iid
     sit.actor = "system"  # replayed, not a real user event
+    sit.is_replay = True
 
     if target_type == "Issue":
         issue = project.issues.get(target_iid)
@@ -246,6 +247,7 @@ async def _resume_item(
     sit.target_iid = target_iid
     sit.actor = "system"  # resumed, not a real user event
     sit.trigger = "resumed"
+    sit.is_replay = True
 
     if target_type == "Issue":
         issue = project.issues.get(target_iid)

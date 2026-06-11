@@ -701,8 +701,9 @@ def _should_skip(sit: Situation) -> bool:
 
     # Issue events: only a NEW assignment of the bot is actionable. Any other
     # update on a bot-assigned issue (labels, title, status) would otherwise
-    # re-trigger a full workflow on every edit.
-    if sit.event_type == "Issue Hook":
+    # re-trigger a full workflow on every edit. Replayed todos / resumed work
+    # carry no webhook action metadata and are pre-vetted by their callers.
+    if sit.event_type == "Issue Hook" and not sit.is_replay:
         is_new_assignment = sit.bot_is_assignee and (
             sit.newly_assigned or (sit.action == "open")
         )
@@ -713,7 +714,7 @@ def _should_skip(sit: Situation) -> bool:
 
     # MR events: actionable only when the bot newly becomes reviewer/assignee
     # (or the MR is opened with the bot already in a role).
-    if sit.event_type == "Merge Request Hook":
+    if sit.event_type == "Merge Request Hook" and not sit.is_replay:
         is_new_role = (
             sit.newly_review_requested
             or sit.newly_assigned

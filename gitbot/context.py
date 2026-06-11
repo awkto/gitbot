@@ -70,6 +70,10 @@ class Situation:
     newly_assigned: bool = False
     newly_review_requested: bool = False
 
+    # Set by todo replay / crash-recovery resume paths, which build synthetic
+    # situations with no webhook action metadata — bypasses the new-assignment gates.
+    is_replay: bool = False
+
     # Pending work from state DB — always available (cheap local lookup)
     pending_question: dict | None = None
 
