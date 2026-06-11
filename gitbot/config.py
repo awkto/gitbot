@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     # LLM — which provider to use
     llm_family: Family | None = None  # anthropic, gemini, openai, ollama, claude-code
 
+    # Workflow engine: "legacy" (gather/plan/execute brain) or "sdk"
+    # (Claude Agent SDK single loop — spike, mention workflow only for now)
+    engine: str = "legacy"
+
     # Provider API keys — set whichever ones you have
     anthropic_api_key: str = ""
     gemini_api_key: str = ""

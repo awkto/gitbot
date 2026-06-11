@@ -173,6 +173,21 @@ async def decide_and_act(sit: Situation) -> None:
     placeholder_id = _post_placeholder(sit)
 
     try:
+        # SDK engine spike (#19): mention/respond workflow through a single
+        # Claude Agent SDK loop. Other workflows still use the legacy brain.
+        if settings.engine == "sdk" and sit.trigger in ("mentioned", "comment"):
+            from gitbot import engine_sdk
+            tracker.add_phase(wf_id, "agent")
+            tracker.log("info", "Running SDK agent loop...", wf_id)
+            _set_working_label(sit)
+            result = await engine_sdk.run_mention(sit)
+            _update_placeholder(sit, placeholder_id, result)
+            _clear_labels(sit)
+            tracker.log("info", f"Completed (sdk): {target_str}", wf_id)
+            tracker.finish_workflow(wf_id, "completed")
+            state.complete_work_item(work_id)
+            return
+
         # Phase 1: Gather context (Haiku)
         tracker.add_phase(wf_id, "gather")
         tracker.log("info", "Gathering context...", wf_id)

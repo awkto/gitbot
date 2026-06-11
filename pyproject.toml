@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "python-gitlab>=5.0",
     "litellm>=1.55",
+    "claude-agent-sdk>=0.2.97",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "httpx>=0.28",

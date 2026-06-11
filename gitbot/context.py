@@ -330,6 +330,34 @@ def _was_added_in_changes(changes: dict, key: str, username: str) -> bool:
     return username in curr and username not in prev
 
 
+_bot_user_id: int | None = None
+
+
+def _get_bot_user_id() -> int | None:
+    """The bot token's own user id, fetched once and cached."""
+    global _bot_user_id
+    if _bot_user_id is None:
+        try:
+            _bot_user_id = glc.get_bot_user_id()
+        except Exception as e:
+            log.warning("Could not resolve bot user id: %s", e)
+            return None
+    return _bot_user_id
+
+
+def _bot_in_assignee_ids(attrs: dict, key: str = "assignee_ids") -> bool:
+    """Check object_attributes ID lists — `action=open` hooks on some GitLab
+    versions omit the top-level assignees array, leaving only the IDs."""
+    ids = attrs.get(key) or []
+    single = attrs.get(key.rstrip("s"))  # assignee_id
+    if single:
+        ids = list(ids) + [single]
+    if not ids:
+        return False
+    bot_id = _get_bot_user_id()
+    return bot_id is not None and bot_id in ids
+
+
 def _extract_issue_basics(sit: Situation, payload: dict) -> None:
     attrs = payload.get("object_attributes", {})
     sit.target_type = "Issue"
@@ -340,7 +368,10 @@ def _extract_issue_basics(sit: Situation, payload: dict) -> None:
     sit.action = attrs.get("action", "")
 
     assignees = payload.get("assignees", [])
-    sit.bot_is_assignee = any(a.get("username") == sit.bot_username for a in assignees)
+    sit.bot_is_assignee = (
+        any(a.get("username") == sit.bot_username for a in assignees)
+        or _bot_in_assignee_ids(attrs)
+    )
     sit.newly_assigned = _was_added_in_changes(
         payload.get("changes", {}), "assignees", sit.bot_username
     )
@@ -360,8 +391,14 @@ def _extract_mr_basics(sit: Situation, payload: dict) -> None:
 
     assignees = payload.get("assignees", [])
     reviewers = payload.get("reviewers", [])
-    sit.bot_is_assignee = any(a.get("username") == sit.bot_username for a in assignees)
-    sit.bot_is_reviewer = any(r.get("username") == sit.bot_username for r in reviewers)
+    sit.bot_is_assignee = (
+        any(a.get("username") == sit.bot_username for a in assignees)
+        or _bot_in_assignee_ids(attrs)
+    )
+    sit.bot_is_reviewer = (
+        any(r.get("username") == sit.bot_username for r in reviewers)
+        or _bot_in_assignee_ids(attrs, "reviewer_ids")
+    )
     changes = payload.get("changes", {})
     sit.newly_assigned = _was_added_in_changes(changes, "assignees", sit.bot_username)
     sit.newly_review_requested = _was_added_in_changes(changes, "reviewers", sit.bot_username)
