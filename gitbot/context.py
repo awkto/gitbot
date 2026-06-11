@@ -63,6 +63,12 @@ class Situation:
     # Triggering comment (for Note Hooks) — always available
     comment_body: str = ""
     discussion_id: str = ""
+    note_is_system: bool = False
+
+    # Webhook action metadata (Issue/MR Hooks) — always available
+    action: str = ""
+    newly_assigned: bool = False
+    newly_review_requested: bool = False
 
     # Pending work from state DB — always available (cheap local lookup)
     pending_question: dict | None = None
@@ -312,6 +318,14 @@ def fetch_source(sit: Situation, source: str) -> None:
 # Basic extractors (no API calls)
 # ---------------------------------------------------------------------------
 
+def _was_added_in_changes(changes: dict, key: str, username: str) -> bool:
+    """True if `username` appears in changes[key].current but not .previous."""
+    change = changes.get(key) or {}
+    prev = {u.get("username") for u in (change.get("previous") or [])}
+    curr = {u.get("username") for u in (change.get("current") or [])}
+    return username in curr and username not in prev
+
+
 def _extract_issue_basics(sit: Situation, payload: dict) -> None:
     attrs = payload.get("object_attributes", {})
     sit.target_type = "Issue"
@@ -319,9 +333,13 @@ def _extract_issue_basics(sit: Situation, payload: dict) -> None:
     sit.target_title = attrs.get("title", "")
     sit.target_description = attrs.get("description", "") or ""
     sit.target_state = attrs.get("state", "opened")
+    sit.action = attrs.get("action", "")
 
     assignees = payload.get("assignees", [])
     sit.bot_is_assignee = any(a.get("username") == sit.bot_username for a in assignees)
+    sit.newly_assigned = _was_added_in_changes(
+        payload.get("changes", {}), "assignees", sit.bot_username
+    )
     sit.trigger = "assigned" if sit.bot_is_assignee else "updated"
 
 
@@ -332,6 +350,7 @@ def _extract_mr_basics(sit: Situation, payload: dict) -> None:
     sit.target_title = attrs.get("title", "")
     sit.target_description = attrs.get("description", "") or ""
     sit.target_state = attrs.get("state", "opened")
+    sit.action = attrs.get("action", "")
     sit.mr_source_branch = attrs.get("source_branch", "")
     sit.mr_target_branch = attrs.get("target_branch", "")
 
@@ -339,6 +358,9 @@ def _extract_mr_basics(sit: Situation, payload: dict) -> None:
     reviewers = payload.get("reviewers", [])
     sit.bot_is_assignee = any(a.get("username") == sit.bot_username for a in assignees)
     sit.bot_is_reviewer = any(r.get("username") == sit.bot_username for r in reviewers)
+    changes = payload.get("changes", {})
+    sit.newly_assigned = _was_added_in_changes(changes, "assignees", sit.bot_username)
+    sit.newly_review_requested = _was_added_in_changes(changes, "reviewers", sit.bot_username)
 
     mr_author = attrs.get("author", {}).get("username") if isinstance(attrs.get("author"), dict) else None
     sit.bot_is_author = (mr_author == sit.bot_username)
@@ -355,6 +377,7 @@ def _extract_note_basics(sit: Situation, payload: dict) -> None:
     note = payload.get("object_attributes", {})
     sit.comment_body = note.get("note", "")
     sit.discussion_id = note.get("discussion_id", "")
+    sit.note_is_system = bool(note.get("system", False))
     noteable_type = note.get("noteable_type", "")
 
     if noteable_type == "Issue" and "issue" in payload:

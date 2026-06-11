@@ -693,6 +693,36 @@ def _should_skip(sit: Situation) -> bool:
         log.info("Ignoring self-triggered event")
         return True
 
+    # System notes ("set status to X", "assigned to Y", "mentioned in !N")
+    # are bookkeeping, not requests — processing them causes duplicate workflows.
+    if sit.event_type == "Note Hook" and sit.note_is_system:
+        log.info("Ignoring system note on %s #%s", sit.target_type, sit.target_iid)
+        return True
+
+    # Issue events: only a NEW assignment of the bot is actionable. Any other
+    # update on a bot-assigned issue (labels, title, status) would otherwise
+    # re-trigger a full workflow on every edit.
+    if sit.event_type == "Issue Hook":
+        is_new_assignment = sit.bot_is_assignee and (
+            sit.newly_assigned or (sit.action == "open")
+        )
+        if not is_new_assignment:
+            log.info("Ignoring issue event (action=%s, newly_assigned=%s)",
+                     sit.action, sit.newly_assigned)
+            return True
+
+    # MR events: actionable only when the bot newly becomes reviewer/assignee
+    # (or the MR is opened with the bot already in a role).
+    if sit.event_type == "Merge Request Hook":
+        is_new_role = (
+            sit.newly_review_requested
+            or sit.newly_assigned
+            or (sit.action == "open" and (sit.bot_is_reviewer or sit.bot_is_assignee))
+        )
+        if not is_new_role:
+            log.info("Ignoring MR event (action=%s)", sit.action)
+            return True
+
     if sit.event_type == "Note Hook":
         has_mention = f"@{sit.bot_username}" in sit.comment_body
         has_pending = sit.pending_question is not None
