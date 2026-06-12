@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     # (Claude Agent SDK single loop — spike, mention workflow only for now)
     engine: str = "legacy"
 
+    # Shell policy for SDK clone workspaces. GitBot's container is not a
+    # devbox — builds and tests belong to the project's CI/CD pipelines.
+    #   none  — no shell; agent edits files, harness commits/pushes/opens the MR
+    #   light — git + a small allowlist (run existing code/tests); installs,
+    #           docker, sudo and network tools are denied (default)
+    #   full  — unrestricted shell (explicit override; or point the bot at a
+    #           dedicated devbox via a future executor tool/MCP instead)
+    local_exec: str = "light"
+
     # Provider API keys — set whichever ones you have
     anthropic_api_key: str = ""
     gemini_api_key: str = ""

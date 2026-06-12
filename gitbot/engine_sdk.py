@@ -11,6 +11,7 @@ GitLab tools as an in-process MCP server and keep the surrounding harness
 import asyncio
 import logging
 import os
+import re
 
 from gitbot.config import settings
 from gitbot.context import Situation
@@ -117,6 +118,77 @@ async def run_mention(sit: Situation) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Shell policy — the gitbot container is not a devbox (github/gitbot#24)
+# ---------------------------------------------------------------------------
+
+# Commands the agent may run in a workspace under local_exec=light.
+# Deliberately small: enough to use git and run code that already exists.
+# Builds, installs and services belong to the project's CI/CD.
+_LIGHT_ALLOWED_COMMANDS = {
+    "git", "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "diff",
+    "echo", "pwd", "cd", "mkdir", "touch", "cp", "mv", "rm", "sed", "awk",
+    "python", "python3", "pytest", "ruff", "make", "sh", "true", "false",
+    "which", "env", "sort", "uniq", "tr", "cut", "xargs", "test", "[",
+}
+
+# Even for allowed interpreters, these substrings mean "installing things" —
+# denied under light policy regardless of the leading command.
+_LIGHT_DENY_MARKERS = (
+    "pip install", "pip3 install", "apt ", "apt-get", "dnf ", "yum ",
+    "docker", "podman", "sudo ", "curl ", "wget ", "nc ", "ssh ",
+    "systemctl", "service ", "npm install", "npm i ", "yarn add",
+    "pip download", "easy_install", "& disown", "nohup ",
+)
+
+
+def _light_policy_violation(command: str) -> str | None:
+    """Return a denial reason if `command` violates the light shell policy."""
+    lowered = f" {command.lower()} "
+    for marker in _LIGHT_DENY_MARKERS:
+        if marker in lowered:
+            return (f"'{marker.strip()}' is not allowed: GitBot's container is not a "
+                    "devbox. Push your branch and let the project's CI/CD run "
+                    "builds, installs and full test suites.")
+
+    # Check the leading word of every pipeline/sequence segment
+    for segment in re.split(r"&&|\|\||;|\||\n", command):
+        segment = segment.strip()
+        if not segment:
+            continue
+        word = segment.split()[0].rsplit("/", 1)[-1]
+        if word.startswith("$") or "=" in word:  # env assignment prefix
+            parts = segment.split()
+            word = next((p.rsplit("/", 1)[-1] for p in parts[1:] if "=" not in p), "")
+        if word and word not in _LIGHT_ALLOWED_COMMANDS:
+            return (f"'{word}' is not in the allowed command set for this "
+                    "workspace (git + lightweight inspection/run commands only). "
+                    "Rely on CI/CD for builds and tests.")
+    return None
+
+
+def _bash_policy_hook():
+    """PreToolUse hook enforcing the light shell policy on Bash calls."""
+    async def policy(input_data, tool_use_id, context):
+        if input_data.get("hook_event_name") != "PreToolUse":
+            return {}
+        if input_data.get("tool_name") != "Bash":
+            return {}
+        command = (input_data.get("tool_input") or {}).get("command", "")
+        reason = _light_policy_violation(command)
+        if reason:
+            log.info("Shell policy denied: %s", command[:120])
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+        return {}
+    return policy
+
+
+# ---------------------------------------------------------------------------
 # Implement workflow (issue assigned → branch + MR) — github/gitbot#20
 # ---------------------------------------------------------------------------
 
@@ -133,7 +205,10 @@ what the issue asks for:
 1. Read the issue and explore the repo (files, structure, conventions).
 2. Create a branch named exactly `{branch_name}` (`git checkout -b {branch_name}`).
 3. Make the changes with the file tools. Match the existing code style.
-4. Run any quick checks that exist and are cheap (linters, tests) via Bash.
+4. You may run existing code, tests or linters for a quick sanity check, but
+   this container is NOT a devbox: do not install packages, run docker, or
+   start services. The project's CI/CD pipeline is what builds and tests
+   your MR — rely on it.
 5. Commit with a clear message and push: `git push -u origin {branch_name}`.
 6. Create a merge request with the `create_merge_request` GitLab tool:
    source_branch={branch_name}, target the default branch, and include
@@ -174,6 +249,44 @@ def _clone_repo(project_id: int, workdir: str) -> tuple[str, str]:
         subprocess.run(["git", "-C", repo_path, "config", k, v],
                        check=True, capture_output=True)
     return repo_path, default_branch
+
+
+def _finalize_no_shell(repo_path: str, branch_name: str, sit: Situation,
+                       default_branch: str) -> str | None:
+    """local_exec=none: branch, commit, push and open the MR on the agent's behalf.
+
+    Returns an error string, or None on success (including 'nothing to commit',
+    which the verification gate will then report).
+    """
+    import subprocess
+
+    from gitbot import gitlab_client as glc
+
+    def run(*args):
+        return subprocess.run(["git", "-C", repo_path, *args],
+                              check=True, capture_output=True, timeout=60)
+
+    try:
+        status = subprocess.run(["git", "-C", repo_path, "status", "--porcelain"],
+                                check=True, capture_output=True, timeout=30)
+        if not status.stdout.strip():
+            return None  # no changes — gate will fail with a clear reason
+        run("checkout", "-b", branch_name)
+        run("add", "-A")
+        run("commit", "-m", f"GitBot: {sit.target_title} (#{sit.target_iid})")
+        run("push", "-u", "origin", branch_name)
+        glc.create_merge_request(
+            sit.project_id,
+            source_branch=branch_name,
+            target_branch=default_branch,
+            title=f"Resolve \"{sit.target_title}\"",
+            description=f"Closes #{sit.target_iid}",
+        )
+        return None
+    except subprocess.CalledProcessError as e:
+        return f"`git {' '.join(e.cmd[3:])}` failed: {e.stderr.decode()[:200]}"
+    except Exception as e:
+        return str(e)[:200]
 
 
 def _verify_implement(project_id: int, issue_iid: int, branch_name: str) -> tuple[dict | None, str]:
@@ -230,8 +343,30 @@ async def run_implement(sit: Situation) -> tuple[str, bool]:
         return (f":x: **Could not clone the repository**: `{str(e)[:200]}`\n\n"
                 "Check that the repo is initialized and the bot has access."), False
 
+    # Shell policy (github/gitbot#24): the container is not a devbox.
+    mode = settings.local_exec
+    allowed = ["Read", "Write", "Edit", "Glob", "Grep",
+               "mcp__gitlab__*", "WebSearch", "WebFetch"]
+    hooks = None
+    system_prompt = IMPLEMENT_SYSTEM
+    if mode == "none":
+        system_prompt = system_prompt.replace(
+            "2. Create a branch named exactly", "2. (handled by the harness)",
+        )
+        system_prompt += (
+            "\nNOTE: You have NO shell in this mode. Just edit the files; the "
+            "harness will branch, commit, push and open the merge request for you. "
+            "Do not call create_merge_request yourself."
+        )
+    else:
+        allowed.insert(5, "Bash")
+        if mode != "full":  # light (default)
+            from claude_agent_sdk import HookMatcher
+            hooks = {"PreToolUse": [HookMatcher(matcher="Bash",
+                                                hooks=[_bash_policy_hook()])]}
+
     options = ClaudeAgentOptions(
-        system_prompt=IMPLEMENT_SYSTEM.format(
+        system_prompt=system_prompt.format(
             target_iid=sit.target_iid,
             target_title=sit.target_title,
             project_name=sit.project_name,
@@ -240,12 +375,12 @@ async def run_implement(sit: Situation) -> tuple[str, bool]:
         ),
         model="claude-sonnet-4-6",
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
-        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash",
-                       "mcp__gitlab__*", "WebSearch", "WebFetch"],
+        allowed_tools=allowed,
         permission_mode="dontAsk",
         max_turns=IMPLEMENT_MAX_TURNS,
         setting_sources=[],
         cwd=repo_path,
+        hooks=hooks,
     )
 
     prompt = (
@@ -265,6 +400,16 @@ async def run_implement(sit: Situation) -> tuple[str, bool]:
                 log.info("SDK engine: implement loop done (subtype=%s, cost=%s)",
                          getattr(message, "subtype", "?"),
                          getattr(message, "total_cost_usd", None))
+
+        # local_exec=none: the agent only edited files — branch/commit/push/MR
+        # are the harness's job.
+        if mode == "none" and not final_text.strip().startswith("BLOCKED"):
+            err = await asyncio.to_thread(
+                _finalize_no_shell, repo_path, branch_name, sit, default_branch
+            )
+            if err:
+                return (f":warning: **GitBot edited files but publishing failed**: "
+                        f"{err}\n\nAgent's report:\n\n{final_text}"), False
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
