@@ -851,6 +851,13 @@ def _post_placeholder(sit: Situation) -> int | None:
     set_label = sit.event_type != "Note Hook"
     try:
         body = ":hourglass_flowing_sand: **GitBot is thinking...**"
+        # Reply in the triggering comment's thread so the whole exchange stays
+        # threaded, rather than dropping a separate top-level comment.
+        if sit.event_type == "Note Hook" and sit.discussion_id:
+            note_id = glc.reply_to_discussion(
+                sit.project_id, sit.target_type, sit.target_iid,
+                sit.discussion_id, body)
+            return note_id
         if sit.target_type == "Issue":
             note_id = glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
             if set_label:

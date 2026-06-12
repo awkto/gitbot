@@ -74,7 +74,8 @@ def remove_issue_labels(project_id: int, issue_iid: int, labels: list[str]) -> N
 
 def reply_to_discussion(
     project_id: int, noteable_type: str, noteable_iid: int, discussion_id: str, body: str
-) -> None:
+) -> int:
+    """Post a threaded reply in an existing discussion. Returns the new note id."""
     gl = get_client()
     project = gl.projects.get(project_id)
     if noteable_type == "MergeRequest":
@@ -82,7 +83,8 @@ def reply_to_discussion(
     else:
         noteable = project.issues.get(noteable_iid)
     discussion = noteable.discussions.get(discussion_id)
-    discussion.notes.create({"body": body})
+    note = discussion.notes.create({"body": body})
+    return note.id
 
 
 def get_mr_diff(project_id: int, mr_iid: int) -> str:
