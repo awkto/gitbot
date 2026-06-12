@@ -348,8 +348,13 @@ Rules:
 - Do NOT close the issue, do NOT merge the MR, do NOT commit to the default branch.
 - Do NOT use post_comment for your final summary — your final text response is
   posted to the issue automatically.
-- If the issue is impossible or too ambiguous to implement, make no commits and
-  explain why in your final response, starting it with the word BLOCKED.
+- If the issue is impossible to implement, make no commits and explain why in
+  your final response, starting it with the word BLOCKED.
+- If there is a CLEAR blocker only the user can resolve (contradictory or
+  critically ambiguous requirements), post ONE consolidated comment tagging
+  {requester} with your questions, then end your final response with
+  NEEDS_INPUT. Otherwise prefer a sensible assumption, noted in the MR
+  description — do not ask about minor choices.
 """
 
 
@@ -495,6 +500,9 @@ async def run_implement(sit: Situation, wf_id: str = "",
             hooks = {"PreToolUse": [HookMatcher(matcher="Bash",
                                                 hooks=[_bash_policy_hook()])]}
 
+    requester = (f"@{sit.actor}" if sit.actor not in ("", "system", "unknown")
+                 else "the issue author")
+
     options = ClaudeAgentOptions(
         system_prompt=system_prompt.format(
             target_iid=sit.target_iid,
@@ -502,6 +510,7 @@ async def run_implement(sit: Situation, wf_id: str = "",
             project_name=sit.project_name,
             project_id=sit.project_id,
             branch_name=branch_name,
+            requester=requester,
         ),
         model="claude-sonnet-4-6",
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
@@ -551,6 +560,10 @@ async def run_implement(sit: Situation, wf_id: str = "",
     if final_text.strip().startswith("BLOCKED"):
         return (f":no_entry: **GitBot could not implement this issue.**\n\n"
                 f"{final_text.strip()[7:].strip()}"), False
+    if final_text.strip().startswith("NEEDS_INPUT"):
+        return (f":raising_hand: **GitBot needs input to continue.**\n\n"
+                f"{final_text.strip()[11:].strip()}\n\n"
+                f"*Reply on this issue to resume the task.*"), "needs_input"
 
     # Structural finish gate — never report success the API can't confirm
     mr_info, reason = await asyncio.to_thread(
@@ -612,6 +625,13 @@ Rules:
   be done, then start your final response with the word WAITING. The harness
   will re-run you periodically; your resumed self will see your comments and
   continue.
+- Asking the user ({requester}): ONLY for a clear blocker you cannot resolve
+  or reasonably assume your way around (contradictory requirements, missing
+  access/permissions, a decision with real consequences). Prefer making a
+  sensible assumption and noting it in your report. To ask: post ONE
+  consolidated comment tagging {requester} with ALL your questions and what
+  you need, then end your final response with NEEDS_INPUT. Their reply will
+  re-trigger you with full context.
 """
 
 
@@ -678,6 +698,9 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             hooks = {"PreToolUse": [HookMatcher(matcher="Bash",
                                                 hooks=[_bash_policy_hook()])]}
 
+    requester = (f"@{sit.actor}" if sit.actor not in ("", "system", "unknown")
+                 else "the issue author")
+
     options = ClaudeAgentOptions(
         system_prompt=ORCHESTRATE_SYSTEM.format(
             gitlab_url=settings.gitlab_url.rstrip("/"),
@@ -685,6 +708,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             target_title=sit.target_title,
             project_name=sit.project_name,
             project_id=sit.project_id,
+            requester=requester,
         ),
         model="claude-sonnet-4-6",
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
@@ -700,6 +724,8 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
         f"Issue #{sit.target_iid}: {sit.target_title}\n\n"
         f"{sit.target_description or '(no description)'}"
     )
+    if sit.comment_body:
+        prompt += f"\n\nLatest comment from @{sit.actor}:\n{sit.comment_body}"
     if sit.is_replay:
         snapshot = await asyncio.to_thread(_resume_snapshot, sit)
         prompt = (
@@ -734,6 +760,10 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
         return (f":double_vertical_bar: **Task parked — waiting on something slow.**\n\n"
                 f"{final_text.strip()[7:].strip()}\n\n"
                 f"*GitBot will check back periodically and resume.*"), "waiting"
+    if final_text.strip().startswith("NEEDS_INPUT"):
+        return (f":raising_hand: **GitBot needs input to continue.**\n\n"
+                f"{final_text.strip()[11:].strip()}\n\n"
+                f"*Reply on this issue to resume the task.*"), "needs_input"
     return final_text, True
 
 

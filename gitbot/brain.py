@@ -180,7 +180,24 @@ async def decide_and_act(sit: Situation) -> None:
             sdk_result: str | None = None
             sdk_ok = True
 
-            if sit.trigger in ("mentioned", "comment"):
+            if (sit.trigger in ("mentioned", "comment") and sit.pending_question
+                    and sit.target_type == "Issue"):
+                # Reply to a question the bot asked — continue the parked task
+                # with the answer in context, not a conversational response.
+                from gitbot import engine_sdk
+                sit.is_replay = True
+                kind = await engine_sdk.classify_assigned_issue(sit)
+                tracker.add_phase(wf_id, "agent")
+                tracker.log("info", f"Answer received — resuming task ({kind})...", wf_id)
+                _set_working_label(sit)
+                if kind == "orchestrate":
+                    sdk_result, sdk_ok = await engine_sdk.run_orchestrate(
+                        sit, wf_id, placeholder_id)
+                else:
+                    sdk_result, sdk_ok = await engine_sdk.run_implement(
+                        sit, wf_id, placeholder_id)
+
+            elif sit.trigger in ("mentioned", "comment"):
                 from gitbot import engine_sdk
                 tracker.add_phase(wf_id, "agent")
                 tracker.log("info", "Running SDK agent loop (mention)...", wf_id)
@@ -210,6 +227,16 @@ async def decide_and_act(sit: Situation) -> None:
                     tracker.log("info", f"Parked (waiting): {target_str}", wf_id)
                     tracker.finish_workflow(wf_id, "completed")
                     state.complete_work_item(work_id)
+                    return
+                if sdk_ok == "needs_input":
+                    # Asked the user a question: park until they reply (the
+                    # reconciler ignores this label; a Note Hook resumes it).
+                    _clear_labels(sit)
+                    _set_label(sit, "gitbot::needs-input")
+                    state.set_pending_response(
+                        work_id, question=sdk_result[:500], asked_user=sit.actor)
+                    tracker.log("info", f"Asked for input: {target_str}", wf_id)
+                    tracker.finish_workflow(wf_id, "completed")
                     return
                 _clear_labels(sit)
                 status = "completed" if sdk_ok else "failed"
@@ -853,7 +880,8 @@ def _set_working_label(sit: Situation) -> None:
     _set_label(sit, "gitbot::working")
 
 
-_GITBOT_LABELS = ["gitbot::thinking", "gitbot::working", "gitbot::waiting"]
+_GITBOT_LABELS = ["gitbot::thinking", "gitbot::working", "gitbot::waiting",
+                  "gitbot::needs-input"]
 
 
 def _clear_labels(sit: Situation) -> None:
