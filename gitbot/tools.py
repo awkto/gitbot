@@ -28,7 +28,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
              "assign_mr", "assign_mr_reviewer"],
     "planning": ["create_milestone", "list_milestones", "assign_milestone",
                   "create_label", "create_wiki_page"],
-    "ci": ["list_pipelines", "get_pipeline", "list_pipeline_jobs",
+    "ci": ["list_pipelines", "get_pipeline", "wait_for_pipeline", "list_pipeline_jobs",
             "get_job_log", "retry_pipeline", "run_pipeline"],
     "epics": ["create_epic", "list_epics", "add_issue_to_epic"],
     "iterations": ["create_iteration_cadence", "create_iteration",
@@ -420,6 +420,21 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "wait_for_pipeline",
+            "description": "Wait (block) until a pipeline reaches a terminal state (success/failed/canceled/skipped) and return its final status with job summary. STRONGLY PREFERRED over polling get_pipeline in a sleep loop — this waits efficiently and returns exactly once. Default timeout 900s.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pipeline_id": {"type": "integer"},
+                    "timeout_seconds": {"type": "integer", "description": "Max seconds to wait (default 900, max 1800)"},
+                },
+                "required": ["pipeline_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_pipeline_jobs",
             "description": "List jobs in a pipeline. Shows job name, stage, status, and duration.",
             "parameters": {
@@ -767,8 +782,8 @@ _PROJECT_SCOPED = {
     "create_merge_request", "get_mr_diff", "assign_mr", "assign_mr_reviewer",
     "create_milestone", "list_milestones",
     "assign_milestone", "assign_iteration", "create_label", "create_wiki_page",
-    "list_pipelines", "get_pipeline", "list_pipeline_jobs", "get_job_log",
-    "retry_pipeline", "run_pipeline", "list_vulnerabilities",
+    "list_pipelines", "get_pipeline", "wait_for_pipeline", "list_pipeline_jobs",
+    "get_job_log", "retry_pipeline", "run_pipeline", "list_vulnerabilities",
 }
 
 _PID_PROP = {"type": "integer", "description": "Target project ID. Omit to use the current project."}
@@ -1027,6 +1042,25 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
                 f"Finished: {p.finished_at}\n"
                 f"URL: {p.web_url}"
             )
+
+        elif tool_name == "wait_for_pipeline":
+            # Harness-side wait: polls the API (token-free) so the model spends
+            # one turn per pipeline instead of a sleep/check loop.
+            import time as _time
+            timeout = min(int(args.get("timeout_seconds") or 900), 1800)
+            deadline = _time.monotonic() + timeout
+            terminal = {"success", "failed", "canceled", "skipped", "manual"}
+            p = project.pipelines.get(args["pipeline_id"])
+            while p.status not in terminal and _time.monotonic() < deadline:
+                _time.sleep(15)
+                p = project.pipelines.get(args["pipeline_id"])
+            jobs = p.jobs.list(per_page=50)
+            job_lines = "\n".join(
+                f"  - {j.name} [{j.stage}]: {j.status}" for j in jobs)
+            timed_out = "" if p.status in terminal else (
+                f"\nNOTE: still '{p.status}' after {timeout}s wait (timed out)")
+            return (f"Pipeline #{p.id} final status: {p.status}{timed_out}\n"
+                    f"Jobs:\n{job_lines}\nURL: {p.web_url}")
 
         elif tool_name == "list_pipeline_jobs":
             pipeline = project.pipelines.get(args["pipeline_id"])

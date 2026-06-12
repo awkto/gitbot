@@ -158,7 +158,9 @@ async def tool_loop_with_model(
                 log.info("Tool call [round %d]: %s(%s)",
                          round_num, fn_name, {k: str(v)[:60] for k, v in fn_args.items()})
 
-                result = execute_fn(fn_name, fn_args)
+                # GitLab calls are blocking IO (and wait_for_pipeline blocks by
+                # design) — keep the event loop responsive
+                result = await asyncio.to_thread(execute_fn, fn_name, fn_args)
                 is_error = isinstance(result, str) and result.startswith("TOOL_ERROR:")
                 actions_taken.append({"tool": fn_name, "args": fn_args, "result": result, "error": is_error})
 

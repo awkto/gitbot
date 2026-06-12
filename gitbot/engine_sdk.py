@@ -588,8 +588,9 @@ Capabilities:
   Python script (stdlib urllib/json) and run it with Bash. The API base is
   {gitlab_url}/api/v4 and a valid token is in the environment variable
   GITBOT_GITLAB_TOKEN (header: PRIVATE-TOKEN). Do not print the token.
-- You may run `sleep` and poll pipelines/jobs with your tools while waiting
-  for CI. Pipelines can take a few minutes — be patient and keep polling.
+- To wait for CI, use the `wait_for_pipeline` tool — it blocks until the
+  pipeline finishes and returns the final status with a job summary. Do NOT
+  poll with sleep loops; one wait_for_pipeline call per pipeline.
 
 Rules:
 - This container is NOT a devbox: no package installs, no docker locally, no
