@@ -608,6 +608,42 @@ Rules:
 """
 
 
+def _resume_snapshot(sit: Situation) -> str:
+    """Harness-gathered state for a resumed task: what the previous run already
+    created. Injected into the prompt so the agent continues instead of
+    re-planning from scratch."""
+    from gitbot import gitlab_client as glc
+
+    parts = []
+    try:
+        gl = glc.get_client()
+        project = gl.projects.get(sit.project_id)
+        ns = project.namespace["full_path"]
+        group = gl.groups.get(ns)
+        projects = group.projects.list(order_by="created_at", sort="desc", per_page=8)
+        lines = [f"- {p.path_with_namespace} (id={p.id}, created {p.created_at[:16]})"
+                 for p in projects if "deletion_scheduled" not in p.path]
+        if lines:
+            parts.append(f"Existing projects in group `{ns}` (newest first):\n" + "\n".join(lines))
+    except Exception as e:
+        log.warning("Resume snapshot: project listing failed: %s", e)
+
+    try:
+        gl = glc.get_client()
+        issue = gl.projects.get(sit.project_id).issues.get(sit.target_iid)
+        notes = [n for n in issue.notes.list(per_page=30, sort="desc")
+                 if not n.system and n.author.get("username") == settings.bot_username]
+        recent = [f"- [{n.created_at[11:19]}] {' '.join(n.body.split())[:200]}"
+                  for n in notes[:6]]
+        if recent:
+            parts.append("Your own recent comments on this issue (newest first):\n"
+                         + "\n".join(recent))
+    except Exception as e:
+        log.warning("Resume snapshot: notes fetch failed: %s", e)
+
+    return "\n\n".join(parts) if parts else "(no prior state could be gathered)"
+
+
 async def run_orchestrate(sit: Situation, wf_id: str = "",
                           placeholder_id: int | None = None) -> tuple[str, bool]:
     """Run a multi-project orchestration task as a single SDK loop.
@@ -658,13 +694,16 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
         f"{sit.target_description or '(no description)'}"
     )
     if sit.is_replay:
-        prompt += (
-            "\n\nIMPORTANT — RESUMED TASK: this work was interrupted (restart/crash) "
-            "and partial progress likely exists. Before doing anything, inspect the "
-            "current state: read this issue's comments for progress notes, list "
-            "recently created projects in the target group, and check branches, "
-            "commits and pipelines. CONTINUE from where the previous run stopped — "
-            "do not create duplicates of work that already exists."
+        snapshot = await asyncio.to_thread(_resume_snapshot, sit)
+        prompt = (
+            "⚠️ RESUMED TASK — READ THIS FIRST. A previous run of this exact task "
+            "was interrupted mid-flight. The state snapshot below shows what it "
+            "already created. You MUST continue from this state: adopt the existing "
+            "projects/branches/pipelines as your own work, verify what stage they "
+            "reached, and proceed with the remaining steps. Creating duplicate "
+            "projects is a failure.\n\n"
+            f"<state_snapshot>\n{snapshot}\n</state_snapshot>\n\n"
+            "--- Original task below ---\n\n" + prompt
         )
 
     log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d, resumed=%s)",
