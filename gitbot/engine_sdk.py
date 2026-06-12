@@ -518,9 +518,16 @@ async def run_implement(sit: Situation, wf_id: str = "",
         f"{sit.target_description or '(no description)'}\n\n"
         f"The repository default branch is `{default_branch}`."
     )
+    if sit.is_replay:
+        prompt += (
+            f"\n\nIMPORTANT — RESUMED TASK: this work was interrupted and partial "
+            f"progress may exist. Check whether branch `{branch_name}` already exists "
+            f"(locally after fetch, or on the remote) and whether an MR is already "
+            f"open; continue from the existing state instead of starting over."
+        )
 
-    log.info("SDK engine: implement workflow start (Issue #%s, branch=%s)",
-             sit.target_iid, branch_name)
+    log.info("SDK engine: implement workflow start (Issue #%s, branch=%s, resumed=%s)",
+             sit.target_iid, branch_name, sit.is_replay)
 
     final_text = ""
     progress.start()
@@ -650,9 +657,18 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
         f"Issue #{sit.target_iid}: {sit.target_title}\n\n"
         f"{sit.target_description or '(no description)'}"
     )
+    if sit.is_replay:
+        prompt += (
+            "\n\nIMPORTANT — RESUMED TASK: this work was interrupted (restart/crash) "
+            "and partial progress likely exists. Before doing anything, inspect the "
+            "current state: read this issue's comments for progress notes, list "
+            "recently created projects in the target group, and check branches, "
+            "commits and pipelines. CONTINUE from where the previous run stopped — "
+            "do not create duplicates of work that already exists."
+        )
 
-    log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d)",
-             sit.target_iid, ORCHESTRATE_MAX_TURNS)
+    log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d, resumed=%s)",
+             sit.target_iid, ORCHESTRATE_MAX_TURNS, sit.is_replay)
 
     progress.start()
     try:
