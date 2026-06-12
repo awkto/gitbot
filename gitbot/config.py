@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     #           dedicated devbox via a future executor tool/MCP instead)
     local_exec: str = "light"
 
+    # Reconciliation sweep interval in minutes (0 = disabled). Picks up
+    # orphaned (crashed) and parked (gitbot::waiting) work. An external
+    # scheduler can also POST /reconcile with the webhook secret.
+    reconcile_minutes: int = 10
+
     # Provider API keys — set whichever ones you have
     anthropic_api_key: str = ""
     gemini_api_key: str = ""

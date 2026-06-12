@@ -161,6 +161,43 @@ def _safe_mark_done(todo_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 _WORKING_LABELS = ["gitbot::working", "gitbot::thinking"]
+_PARKED_LABELS = ["gitbot::waiting"]
+
+
+async def reconcile() -> None:
+    """Periodic sweep: resume orphaned (gitbot::working with no live workflow)
+    and parked (gitbot::waiting) items. Safe to run while workflows are active —
+    targets whose lock is currently held are skipped.
+    """
+    from gitbot import locks
+
+    found: dict[tuple[int, str, int], dict] = {}
+    for label in _WORKING_LABELS + _PARKED_LABELS:
+        try:
+            for item in glc.find_items_by_label(label):
+                key = (item["project_id"], item["target_type"], item["target_iid"])
+                found.setdefault(key, {**item, "label": label})
+        except Exception:
+            log.exception("Reconcile: label search failed for %s", label)
+
+    if not found:
+        return
+
+    for key, info in found.items():
+        project_id, target_type, target_iid = key
+        if locks.get_lock(project_id, target_type, target_iid).locked():
+            log.debug("Reconcile: %s #%s is actively being worked — skipping",
+                      target_type, target_iid)
+            continue
+        log.info("Reconcile: picking up %s #%s (%s)",
+                 target_type, target_iid, info.get("label"))
+        lock = await locks.acquire(project_id, target_type, target_iid)
+        try:
+            await _resume_item(project_id, target_type, target_iid, info)
+        except Exception:
+            log.exception("Reconcile: failed to resume %s #%s", target_type, target_iid)
+        finally:
+            lock.release()
 
 
 async def resume_incomplete_work() -> None:

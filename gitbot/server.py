@@ -52,6 +52,21 @@ async def lifespan(app: FastAPI):
             log.exception("Error resuming incomplete work on startup")
 
     asyncio.create_task(_resume_in_background())
+
+    # Periodic reconciliation: picks up orphaned and parked (gitbot::waiting)
+    # work — the issue thread is the durable state, this sweep is the resume.
+    async def _reconcile_loop():
+        from gitbot.todos import reconcile
+        while True:
+            await asyncio.sleep(settings.reconcile_minutes * 60)
+            try:
+                await reconcile()
+            except Exception:
+                log.exception("Reconcile sweep failed")
+
+    if settings.reconcile_minutes > 0:
+        asyncio.create_task(_reconcile_loop())
+        log.info("Reconciliation sweep every %d min", settings.reconcile_minutes)
     yield
 
 
@@ -71,6 +86,24 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": APP_VERSION, "admin": settings.admin_enabled}
+
+
+@app.post("/reconcile")
+async def reconcile_now(x_gitlab_token: str | None = Header(None)):
+    """External trigger for the reconciliation sweep (e.g. a scheduled CI job
+    or cron). Authenticated with the same secret as the webhook."""
+    if settings.webhook_secret and x_gitlab_token != settings.webhook_secret:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    from gitbot.todos import reconcile
+
+    async def _safe():
+        try:
+            await reconcile()
+        except Exception:
+            log.exception("Reconcile (external trigger) failed")
+
+    asyncio.create_task(_safe())
+    return {"status": "reconciling"}
 
 
 @app.post("/webhook")

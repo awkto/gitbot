@@ -202,6 +202,15 @@ async def decide_and_act(sit: Situation) -> None:
 
             if sdk_result is not None:
                 _update_placeholder(sit, placeholder_id, sdk_result)
+                if sdk_ok == "waiting":
+                    # Parked: swap working labels for gitbot::waiting so the
+                    # reconciliation sweep picks it back up later.
+                    _clear_labels(sit)
+                    _set_label(sit, "gitbot::waiting")
+                    tracker.log("info", f"Parked (waiting): {target_str}", wf_id)
+                    tracker.finish_workflow(wf_id, "completed")
+                    state.complete_work_item(work_id)
+                    return
                 _clear_labels(sit)
                 status = "completed" if sdk_ok else "failed"
                 tracker.log("info", f"Completed (sdk, {status}): {target_str}", wf_id)
@@ -829,15 +838,19 @@ def _remove_placeholder(sit: Situation, placeholder_id: int | None) -> None:
     _clear_labels(sit)
 
 
-def _set_working_label(sit: Situation) -> None:
-    """Set gitbot::working label on the target (Issue or MR)."""
+def _set_label(sit: Situation, label: str) -> None:
+    """Set a gitbot label on the target (Issue or MR)."""
     try:
         if sit.target_type == "Issue":
-            glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
+            glc.set_issue_labels(sit.project_id, sit.target_iid, [label])
         elif sit.target_type == "MergeRequest":
-            glc.set_mr_labels(sit.project_id, sit.target_iid, ["gitbot::working"])
+            glc.set_mr_labels(sit.project_id, sit.target_iid, [label])
     except Exception:
         pass
+
+
+def _set_working_label(sit: Situation) -> None:
+    _set_label(sit, "gitbot::working")
 
 
 _GITBOT_LABELS = ["gitbot::thinking", "gitbot::working", "gitbot::waiting"]

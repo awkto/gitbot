@@ -606,6 +606,12 @@ Rules:
   a markdown checklist of every requested item marked ✅ done / ❌ failed
   (with reason). Be honest — the harness audits your claims.
 - If the whole task is impossible, start your final response with BLOCKED.
+- If you are stuck waiting on something genuinely slow (a pipeline beyond a
+  wait_for_pipeline timeout, an external dependency), you may PARK the task:
+  post a comment stating exactly what you are waiting for and what remains to
+  be done, then start your final response with the word WAITING. The harness
+  will re-run you periodically; your resumed self will see your comments and
+  continue.
 """
 
 
@@ -724,6 +730,10 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
     if final_text.strip().startswith("BLOCKED"):
         return (f":no_entry: **GitBot could not complete this task.**\n\n"
                 f"{final_text.strip()[7:].strip()}"), False
+    if final_text.strip().startswith("WAITING"):
+        return (f":double_vertical_bar: **Task parked — waiting on something slow.**\n\n"
+                f"{final_text.strip()[7:].strip()}\n\n"
+                f"*GitBot will check back periodically and resume.*"), "waiting"
     return final_text, True
 
 
