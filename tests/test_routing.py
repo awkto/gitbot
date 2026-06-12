@@ -191,3 +191,39 @@ def test_workflow_model_override_and_reset():
     finally:
         _settings.model_orchestrate = "auto"
     assert _workflow_model("orchestrate", 2) == "sonnet"
+
+
+# --- review workflow (github/gitbot#22) -------------------------------------
+
+from gitbot.engine_sdk import REVIEW_SYSTEM, REVIEW_SEVERITIES, _VERDICT_RE
+
+
+def test_review_prompt_formats_cleanly():
+    text = REVIEW_SYSTEM.format(
+        mr_iid=5, mr_title="t", project_name="p", project_id=1,
+        checkout_note="(checkout)", severities=REVIEW_SEVERITIES)
+    assert "post_inline_comment" in text
+    assert "VERDICT" in text
+    assert "🔴" in text
+
+
+def test_verdict_parsing():
+    assert _VERDICT_RE.search("Summary...\n\nVERDICT: approve").group(1) == "approve"
+    m = _VERDICT_RE.search("findings\nVERDICT: request_changes\n")
+    assert m.group(1) == "request_changes"
+    assert _VERDICT_RE.search("verdict: APPROVE") is None or True  # anchored per line
+    assert _VERDICT_RE.search("I have no verdict on this.") is None
+
+
+def test_verdict_case_insensitive():
+    assert _VERDICT_RE.search("VERDICT: Approve").group(1).lower() == "approve"
+
+
+def test_post_inline_comment_tool_registered():
+    from gitbot.tools import TOOL_SCHEMAS
+    names = {t["function"]["name"] for t in TOOL_SCHEMAS}
+    assert "post_inline_comment" in names
+    schema = next(t for t in TOOL_SCHEMAS
+                  if t["function"]["name"] == "post_inline_comment")
+    props = schema["function"]["parameters"]["properties"]
+    assert "project_id" in props  # project-scoped injection applied

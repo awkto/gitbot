@@ -1011,6 +1011,195 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
 
 
 # ---------------------------------------------------------------------------
+# Review workflow (MR review requested → inline findings + verdict) — github/gitbot#22
+# ---------------------------------------------------------------------------
+
+REVIEW_MAX_TURNS = 50
+
+# In app code so every model instance marks findings the same way (same
+# reasoning as QUESTION_SCALE / COMPLEXITY_SCALE).
+REVIEW_SEVERITIES = """\
+Severity scale (use these markers exactly, both inline and in the summary):
+- 🔴 **critical** — bugs, data loss, security holes, broken behavior. Blocks merge.
+- 🟠 **major** — likely bugs, missing error handling, races, API misuse. Should fix before merge.
+- 🟡 **minor** — style inconsistency, naming, missing tests, small refactors. Worth fixing.
+- 🔵 **nit** — taste-level suggestion. The author may ignore freely.\
+"""
+
+REVIEW_SYSTEM = """\
+You are GitBot, an AI code reviewer inside a GitLab instance. You have been
+asked to review merge request !{mr_iid} ("{mr_title}") in project
+"{project_name}" (ID: {project_id}).
+
+{checkout_note} The full MR diff is in the task prompt.
+
+How to review:
+1. Read the diff, then judge the changes in context: read the surrounding
+   code, callers, and tests with the file tools (git log/blame may help).
+   Review the CHANGE, not the whole repository.
+2. Verify claims before asserting them — if you think "X is never called" or
+   "this breaks Y", grep for it first. Wrong review comments destroy trust.
+3. Post each concrete finding as an inline comment with the
+   `post_inline_comment` tool, on the exact line, starting with its severity
+   marker. Only lines that appear in the diff are valid anchors; if the right
+   line is not in the diff, put the finding in the summary instead.
+
+{severities}
+
+Rules:
+- You are a reviewer: do NOT modify files, push, merge, approve, close, or
+  edit the MR. Comments only.
+- A clean MR deserves a short approval, not invented nitpicks.
+- Do NOT use post_comment for your summary — your final text response is
+  posted to the MR automatically.
+- Your final response is the review summary: a 2-4 sentence assessment, then
+  your findings with severity markers (matching the inline comments), then
+  end with exactly one line:
+  VERDICT: approve            (nothing 🔴/🟠 found)
+  VERDICT: request_changes    (at least one 🔴/🟠 finding)
+- If the MR cannot be reviewed at all (empty diff, unreadable repo), start
+  your final response with BLOCKED and say why.
+"""
+
+_VERDICT_RE = re.compile(r"^\s*VERDICT:\s*(approve|request_changes)\s*$", re.M | re.I)
+
+REVIEW_DIFF_CAP = 50_000  # chars of diff inlined in the prompt
+
+
+def _checkout_mr_head(project_id: int, mr_iid: int, workdir: str) -> str:
+    """Clone the repo and check out the MR's head commit (works for fork MRs
+    too via the refs/merge-requests/ ref). Returns the repo path."""
+    import subprocess
+
+    repo_path, _ = _clone_repo(project_id, workdir)
+    subprocess.run(
+        ["git", "-C", repo_path, "fetch", "--depth", "50", "origin",
+         f"refs/merge-requests/{mr_iid}/head"],
+        check=True, capture_output=True, timeout=120,
+    )
+    subprocess.run(
+        ["git", "-C", repo_path, "checkout", "-b", f"mr-{mr_iid}", "FETCH_HEAD"],
+        check=True, capture_output=True, timeout=60,
+    )
+    return repo_path
+
+
+async def run_review(sit: Situation, wf_id: str = "",
+                     placeholder_id: int | None = None) -> tuple[str, bool]:
+    """Review an MR: checkout head → SDK loop → inline findings + verdict.
+
+    Returns (markdown_summary, success). There is no structural gate beyond a
+    non-empty report — the deliverable IS the report (plus any inline
+    comments the agent posted along the way).
+    """
+    import shutil
+    import tempfile
+
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
+
+    from gitbot import gitlab_client as glc
+
+    _setup_subprocess_env()
+
+    progress = Progress(sit, placeholder_id)
+    workdir = tempfile.mkdtemp(prefix=f"gitbot-review-{sit.project_id}-{sit.target_iid}-")
+
+    checkout_note = ("A working clone of the repository, checked out at the "
+                     "MR's head commit, is in your current directory.")
+    try:
+        repo_path = await asyncio.to_thread(
+            _checkout_mr_head, sit.project_id, sit.target_iid, workdir)
+    except Exception as e:
+        # Degraded mode: review from the API diff + read_file tools only.
+        log.warning("Review checkout failed for MR !%s: %s", sit.target_iid, e)
+        repo_path = workdir
+        checkout_note = ("No local checkout is available — use the read_file "
+                         "and get_mr_diff GitLab tools to inspect code.")
+
+    try:
+        diff = await asyncio.to_thread(glc.get_mr_diff, sit.project_id, sit.target_iid)
+    except Exception as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (f":x: **Could not fetch the MR diff**: `{str(e)[:200]}`", False)
+    if not diff.strip():
+        shutil.rmtree(workdir, ignore_errors=True)
+        return (":no_entry: **Nothing to review** — the merge request has an empty diff.", False)
+    if len(diff) > REVIEW_DIFF_CAP:
+        diff = diff[:REVIEW_DIFF_CAP] + "\n... (diff truncated — use the get_mr_diff tool or the local checkout for the rest)"
+
+    try:
+        details = await asyncio.to_thread(glc.get_mr_details, sit.project_id, sit.target_iid)
+    except Exception:
+        details = {}
+
+    allowed = ["Read", "Glob", "Grep", "mcp__gitlab__*", "WebSearch", "WebFetch"]
+    hooks = None
+    if settings.local_exec != "none":
+        allowed.insert(3, "Bash")
+        if settings.local_exec != "full":
+            hooks = {"PreToolUse": [HookMatcher(matcher="Bash",
+                                                hooks=[_bash_policy_hook()])]}
+
+    options = ClaudeAgentOptions(
+        system_prompt=REVIEW_SYSTEM.format(
+            mr_iid=sit.target_iid,
+            mr_title=sit.target_title,
+            project_name=sit.project_name,
+            project_id=sit.project_id,
+            checkout_note=checkout_note,
+            severities=REVIEW_SEVERITIES,
+        ),
+        model=_workflow_model("review", sit.task_complexity),
+        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
+        allowed_tools=allowed,
+        permission_mode="dontAsk",
+        max_turns=REVIEW_MAX_TURNS,
+        setting_sources=[],
+        cwd=repo_path,
+        hooks=hooks,
+    )
+
+    author = details.get("author") or "?"
+    prompt = (
+        f"Review MR !{sit.target_iid}: {sit.target_title}\n"
+        f"Author: @{author} | Branch: {details.get('source_branch', '?')} → "
+        f"{details.get('target_branch', '?')}\n\n"
+        f"{sit.target_description or '(no description)'}\n\n"
+        f"<diff>\n{diff}\n</diff>"
+    )
+    if sit.comment_body:
+        prompt += f"\n\nLatest comment from @{sit.actor}:\n{sit.comment_body}"
+
+    log.info("SDK engine: review workflow start (MR !%s, max_turns=%d, model=%s, complexity=%s)",
+             sit.target_iid, REVIEW_MAX_TURNS, options.model, sit.task_complexity)
+
+    progress.start()
+    try:
+        final_text = await _drive(query(prompt=prompt, options=options),
+                                  progress, wf_id, "review")
+    finally:
+        progress.stop()
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    if not final_text:
+        return ":warning: **GitBot produced no review** (loop ended without a result).", False
+    if final_text.strip().startswith("BLOCKED"):
+        return (f":no_entry: **GitBot could not review this MR.**\n\n"
+                f"{final_text.strip()[7:].strip()}"), False
+
+    m = _VERDICT_RE.search(final_text)
+    verdict = m.group(1).lower() if m else None
+    if verdict == "approve":
+        header = ":white_check_mark: **Review complete — looks good.**"
+    elif verdict == "request_changes":
+        header = ":warning: **Review complete — changes requested.**"
+    else:
+        log.warning("Review for MR !%s ended without a VERDICT line", sit.target_iid)
+        header = ":mag: **Review complete.**"
+    return f"{header}\n\n{final_text}", True
+
+
+# ---------------------------------------------------------------------------
 # Assigned-issue triage: single-repo code change vs orchestration
 # ---------------------------------------------------------------------------
 

@@ -106,6 +106,36 @@ def reply_to_discussion(
     return note.id
 
 
+def create_mr_inline_discussion(
+    project_id: int, mr_iid: int, body: str,
+    new_path: str, new_line: int | None = None,
+    old_path: str | None = None, old_line: int | None = None,
+) -> str:
+    """Start a discussion anchored to a specific line of the MR diff.
+
+    new_line is the line number in the file AFTER the change (added/context
+    lines); for a removed line pass old_line instead. The line must appear in
+    the MR diff or GitLab rejects the position. Returns the discussion id.
+    """
+    gl = get_client()
+    mr = gl.projects.get(project_id).mergerequests.get(mr_iid)
+    refs = mr.diff_refs or {}
+    position = {
+        "position_type": "text",
+        "base_sha": refs.get("base_sha"),
+        "start_sha": refs.get("start_sha"),
+        "head_sha": refs.get("head_sha"),
+        "new_path": new_path,
+        "old_path": old_path or new_path,
+    }
+    if new_line is not None:
+        position["new_line"] = new_line
+    if old_line is not None:
+        position["old_line"] = old_line
+    discussion = mr.discussions.create({"body": body, "position": position})
+    return discussion.id
+
+
 def get_mr_diff(project_id: int, mr_iid: int) -> str:
     """Get the diff of an MR as a unified diff string."""
     gl = get_client()

@@ -253,6 +253,16 @@ async def decide_and_act(sit: Situation) -> None:
                     sdk_result, sdk_ok = await engine_sdk.run_implement(
                         sit, wf_id, placeholder_id)
 
+            elif (sit.target_type == "MergeRequest"
+                    and sit.trigger in ("review_requested", "assigned", "resumed")):
+                # MR review (github/gitbot#22): inline findings + verdict on Opus.
+                from gitbot import engine_sdk
+                tracker.add_phase(wf_id, "agent")
+                tracker.log("info", "Running SDK agent loop (review)...", wf_id)
+                _set_working_label(sit)
+                sdk_result, sdk_ok = await engine_sdk.run_review(
+                    sit, wf_id, placeholder_id)
+
             if sdk_result is not None:
                 _update_placeholder(sit, placeholder_id, sdk_result)
                 if sit.event_type == "Note Hook" and sit.comment_body:

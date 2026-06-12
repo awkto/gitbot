@@ -298,6 +298,27 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "post_inline_comment",
+            "description": "Start a review discussion on a specific line of a merge request diff. "
+                           "The line MUST appear in the MR diff. Use new_line (line number in the "
+                           "file after the change) for added/unchanged lines; use old_line instead "
+                           "for removed lines.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mr_iid": {"type": "integer"},
+                    "body": {"type": "string", "description": "The comment (markdown)"},
+                    "new_path": {"type": "string", "description": "File path in the MR"},
+                    "new_line": {"type": "integer", "description": "Line number after the change"},
+                    "old_line": {"type": "integer", "description": "Line number before the change (removed lines only)"},
+                },
+                "required": ["mr_iid", "body", "new_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "assign_mr",
             "description": "Assign users to a merge request.",
             "parameters": {
@@ -779,7 +800,8 @@ TOOL_SCHEMAS = [
 _PROJECT_SCOPED = {
     "create_issue", "update_issue", "search_issues", "link_issues",
     "create_branch", "commit_files", "read_file", "list_files",
-    "create_merge_request", "get_mr_diff", "assign_mr", "assign_mr_reviewer",
+    "create_merge_request", "get_mr_diff", "post_inline_comment",
+    "assign_mr", "assign_mr_reviewer",
     "create_milestone", "list_milestones",
     "assign_milestone", "assign_iteration", "create_label", "create_wiki_page",
     "list_pipelines", "get_pipeline", "wait_for_pipeline", "list_pipeline_jobs",
@@ -960,6 +982,16 @@ def execute_tool(tool_name: str, args: dict, project_id: int) -> str:
             if len(diff) > 8000:
                 diff = diff[:8000] + "\n... (truncated)"
             return diff
+
+        elif tool_name == "post_inline_comment":
+            discussion_id = glc.create_mr_inline_discussion(
+                effective_pid, args["mr_iid"], args["body"],
+                new_path=args["new_path"],
+                new_line=args.get("new_line"),
+                old_line=args.get("old_line"),
+            )
+            loc = args.get("new_line") or f"old:{args.get('old_line')}"
+            return f"Inline comment posted on {args['new_path']}:{loc} (discussion {discussion_id})"
 
         elif tool_name == "assign_mr":
             mr = project.mergerequests.get(args["mr_iid"])
