@@ -311,14 +311,19 @@ async def reconcile() -> None:
         from gitbot import state
         for item in state.get_stale_in_progress(max_age_hours=0.25):
             key = (item["project_id"], item["target_type"], item["target_iid"])
-            found.setdefault(key, {
-                "project_id": item["project_id"],
-                "target_type": item["target_type"],
-                "target_iid": item["target_iid"],
-                "title": "",
-                "label": None,
-                "work_item": item,
-            })
+            if key in found:
+                # The label resume covers this target — close the dead row
+                # so it doesn't replay again after that session finishes.
+                state.fail_work_item(item["id"])
+            else:
+                found[key] = {
+                    "project_id": item["project_id"],
+                    "target_type": item["target_type"],
+                    "target_iid": item["target_iid"],
+                    "title": "",
+                    "label": None,
+                    "work_item": item,
+                }
     except Exception:
         log.exception("Reconcile: state DB scan failed")
 
@@ -373,21 +378,22 @@ async def resume_incomplete_work() -> None:
         stale_items = state.get_all_in_progress()
         for item in stale_items:
             key = (item["project_id"], item["target_type"], item["target_iid"])
-            if key not in found:
+            if key in found:
+                # The label resume covers this target — close the dead row.
+                state.fail_work_item(item["id"])
+            else:
                 found[key] = {
                     "project_id": item["project_id"],
                     "target_type": item["target_type"],
                     "target_iid": item["target_iid"],
                     "title": "",
                     "source": "state_db",
-                    "work_id": item["id"],
+                    "work_item": item,
                 }
                 log.info(
                     "Found interrupted work via state DB: %s #%s (work_id=%s)",
                     item["target_type"], item["target_iid"], item["id"],
                 )
-            # Mark the stale DB item as failed regardless — the resume will create a new one
-            state.fail_work_item(item["id"])
     except Exception:
         log.exception("Failed to check state DB for stale work items")
 
