@@ -127,7 +127,7 @@ async def run_mention(sit: Situation) -> str:
 _LIGHT_ALLOWED_COMMANDS = {
     "git", "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "diff",
     "echo", "pwd", "cd", "mkdir", "touch", "cp", "mv", "rm", "sed", "awk",
-    "python", "python3", "pytest", "ruff", "make", "sh", "true", "false",
+    "python", "python3", "pytest", "ruff", "make", "true", "false",
     "which", "env", "sort", "uniq", "tr", "cut", "xargs", "test", "[",
 }
 
@@ -141,9 +141,24 @@ _LIGHT_DENY_MARKERS = (
 )
 
 
+def _strip_literals(command: str) -> str:
+    """Remove quoted strings, heredoc bodies and $() bodies so the segment
+    checker only sees actual command positions (a commit message containing
+    'docker' must not trip the allowlist)."""
+    # Heredoc bodies: from <<MARKER to the line that is exactly MARKER
+    out = re.sub(
+        r"<<-?\s*'?\"?(\w+)'?\"?.*?\n\1\b", "<<HEREDOC", command, flags=re.S
+    )
+    out = re.sub(r"\$\([^)]*\)", "SUBST", out)     # command substitutions
+    out = re.sub(r"'[^']*'", "STR", out)            # single-quoted
+    out = re.sub(r'"[^"]*"', "STR", out)            # double-quoted
+    return out
+
+
 def _light_policy_violation(command: str) -> str | None:
     """Return a denial reason if `command` violates the light shell policy."""
-    lowered = f" {command.lower()} "
+    stripped = _strip_literals(command)
+    lowered = f" {stripped.lower()} "
     for marker in _LIGHT_DENY_MARKERS:
         if marker in lowered:
             return (f"'{marker.strip()}' is not allowed: GitBot's container is not a "
@@ -151,7 +166,7 @@ def _light_policy_violation(command: str) -> str | None:
                     "builds, installs and full test suites.")
 
     # Check the leading word of every pipeline/sequence segment
-    for segment in re.split(r"&&|\|\||;|\||\n", command):
+    for segment in re.split(r"&&|\|\||;|\||\n", stripped):
         segment = segment.strip()
         if not segment:
             continue
