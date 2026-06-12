@@ -303,6 +303,25 @@ async def reconcile() -> None:
         except Exception:
             log.exception("Reconcile: label search failed for %s", label)
 
+    # State-DB orphans: unlocked IN_PROGRESS rows past the grace period are
+    # sessions that died with the process. Comment callouts leave no labels
+    # and their GitLab todo auto-completes on the bot's first comment — this
+    # row is the ONLY trace of a mid-session interruption.
+    try:
+        from gitbot import state
+        for item in state.get_stale_in_progress(max_age_hours=0.25):
+            key = (item["project_id"], item["target_type"], item["target_iid"])
+            found.setdefault(key, {
+                "project_id": item["project_id"],
+                "target_type": item["target_type"],
+                "target_iid": item["target_iid"],
+                "title": "",
+                "label": None,
+                "work_item": item,
+            })
+    except Exception:
+        log.exception("Reconcile: state DB scan failed")
+
     if not found:
         return
 
@@ -408,6 +427,40 @@ async def _resume_item(
     sit.target_type = target_type
     sit.target_iid = target_iid
     sit.actor = "system"  # resumed, not a real user event
+
+    # State-DB orphans: close out the dead row first (the replay session
+    # creates its own), or every sweep would re-find it.
+    if info.get("work_item"):
+        from gitbot import state
+        state.fail_work_item(info["work_item"]["id"])
+
+    # An orphan with stored Note Hook context is an interrupted comment
+    # callout — replay it as the comment it was, NOT as task work on the
+    # whole issue.
+    ctx = (info.get("work_item") or {}).get("context") or {}
+    if ctx.get("event_type") == "Note Hook" and ctx.get("comment_body"):
+        if target_type == "Issue":
+            t = project.issues.get(target_iid)
+        else:
+            t = project.mergerequests.get(target_iid)
+        if t.state != "opened":
+            return
+        sit.target_title = t.title
+        sit.target_description = t.description or ""
+        sit.target_state = t.state
+        sit.event_type = "Note Hook"
+        sit.trigger = ctx.get("trigger", "mentioned")
+        sit.actor = ctx.get("actor", "system")
+        sit.comment_body = ctx["comment_body"]
+        sit.discussion_id = ctx.get("discussion_id", "")
+        sit.bot_is_assignee = any(
+            a.get("username") == sit.bot_username for a in (t.assignees or []))
+        sit.pending_question = state.get_pending_question(
+            project_id, target_type, target_iid)
+        log.info("  -> Replaying interrupted callout on %s #%s",
+                 target_type, target_iid)
+        await decide_and_act(sit)
+        return
 
     queued = info.get("label") in _QUEUED_LABELS
     if queued:

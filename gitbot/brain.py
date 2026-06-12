@@ -164,9 +164,19 @@ async def decide_and_act(sit: Situation) -> None:
                                 target_url=sit.target_web_url)
     tracker.log("info", f"Started: {target_str} ({sit.trigger})", wf_id)
 
-    # Track in state DB so we can resume on restart
+    # Track in state DB so we can resume on restart. The stored event context
+    # lets an interrupted session be replayed faithfully — critical for
+    # comment callouts, which leave no labels and whose GitLab todo is
+    # auto-completed the moment our placeholder comment posts.
     work_id = state.create_work_item(
         sit.project_id, sit.target_type, sit.target_iid, wf_id,
+        context={
+            "event_type": sit.event_type,
+            "trigger": sit.trigger,
+            "actor": sit.actor,
+            "comment_body": (sit.comment_body or "")[:2000],
+            "discussion_id": sit.discussion_id,
+        },
     )
     sit._wf_id = wf_id
     sit._work_id = work_id
