@@ -49,6 +49,7 @@ class Situation:
     # Target basics — always available
     project_id: int = 0
     project_name: str = ""
+    project_web_url: str = ""
     target_type: str = ""
     target_iid: int = 0
     target_title: str = ""
@@ -86,6 +87,14 @@ class Situation:
 
     # Track what's been fetched
     fetched_sources: set[str] = field(default_factory=set)
+
+    @property
+    def target_web_url(self) -> str:
+        """Deep link to the triggering issue/MR (empty if unknown)."""
+        if not self.project_web_url or not self.target_iid:
+            return ""
+        kind = "issues" if self.target_type == "Issue" else "merge_requests"
+        return f"{self.project_web_url}/-/{kind}/{self.target_iid}"
 
     def to_prompt(self) -> str:
         """Render current knowledge as prompt."""
@@ -147,6 +156,7 @@ def build_minimal(event_type: str, payload: dict) -> Situation:
     sit.actor = (payload.get("user") or {}).get("username", "unknown")
     sit.project_id = (payload.get("project") or {}).get("id", 0)
     sit.project_name = (payload.get("project") or {}).get("name", "")
+    sit.project_web_url = (payload.get("project") or {}).get("web_url", "")
 
     if event_type == "Issue Hook":
         _extract_issue_basics(sit, payload)

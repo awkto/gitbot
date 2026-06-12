@@ -67,6 +67,7 @@ class Workflow:
     status: str = "running"  # running, completed, failed
     trigger: str = ""        # "assigned", "mentioned", etc.
     target: str = ""         # "Issue #42", "MR !5"
+    target_url: str = ""     # deep link to the issue/MR in GitLab
     project: str = ""
     plan_steps: int = 0
     completed_steps: int = 0
@@ -87,6 +88,7 @@ class Workflow:
             "status": self.status,
             "trigger": self.trigger,
             "target": self.target,
+            "target_url": self.target_url,
             "project": self.project,
             "plan_steps": self.plan_steps,
             "completed_steps": self.completed_steps,
@@ -137,11 +139,13 @@ class ActivityTracker:
         with self._lock:
             self._stats["webhooks_skipped"] += 1
 
-    def start_workflow(self, workflow_id: str, trigger: str, target: str, project: str) -> Workflow:
+    def start_workflow(self, workflow_id: str, trigger: str, target: str,
+                       project: str, target_url: str = "") -> Workflow:
         with self._lock:
             wf = Workflow(
                 id=workflow_id, started=time.time(),
                 trigger=trigger, target=target, project=project,
+                target_url=target_url,
             )
             self._current[workflow_id] = wf
             self._workflows.append(wf)

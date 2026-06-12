@@ -117,6 +117,7 @@ async def _replay_todo(
     sit.bot_username = settings.bot_username
     sit.project_id = project_id
     sit.project_name = project.name
+    sit.project_web_url = getattr(project, "web_url", "")
     sit.target_type = target_type
     sit.target_iid = target_iid
     sit.actor = "system"  # replayed, not a real user event
@@ -243,6 +244,7 @@ async def _resume_item(
     sit.bot_username = settings.bot_username
     sit.project_id = project_id
     sit.project_name = project.name
+    sit.project_web_url = getattr(project, "web_url", "")
     sit.target_type = target_type
     sit.target_iid = target_iid
     sit.actor = "system"  # resumed, not a real user event

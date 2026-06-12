@@ -236,7 +236,7 @@ function renderWorkflowTable() {
   document.getElementById('wfCount').textContent = `(${allWorkflows.length})`;
   el.innerHTML = allWorkflows.map(w => `
     <tr class="clickable ${selectedWf === w.id ? 'selected' : ''}" onclick="selectWorkflow('${w.id}')">
-      <td><strong>${w.target}</strong></td>
+      <td><strong>${w.target_url ? `<a href="${w.target_url}" target="_blank" onclick="event.stopPropagation()" style="color:inherit;text-decoration:underline dotted">${w.target}</a>` : w.target}</strong></td>
       <td style="color:#8b949e">${w.project}</td>
       <td>${w.trigger}</td>
       <td>${w.completed_steps}/${w.plan_steps}</td>
@@ -270,7 +270,9 @@ function renderDetail() {
   const wf = allWorkflows.find(w => w.id === selectedWf);
   if (!wf) return;
 
-  document.getElementById('detailTitle').textContent = `${wf.target}`;
+  document.getElementById('detailTitle').innerHTML = wf.target_url
+    ? `<a href="${wf.target_url}" target="_blank" style="color:inherit">${wf.target} ↗</a>`
+    : `${wf.target}`;
   document.getElementById('detailMeta').innerHTML = `
     ${statusBadge(wf.status)}
     <span>Project: <strong>${wf.project}</strong></span>

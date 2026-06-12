@@ -39,9 +39,12 @@ Rules:
 """
 
 
-def _build_gitlab_mcp_server(project_id: int):
+def _build_gitlab_mcp_server(project_id: int, wf_id: str = "",
+                             progress: "Progress | None" = None):
     """Expose the existing GitLab tool set as an in-process SDK MCP server."""
     from claude_agent_sdk import create_sdk_mcp_server, tool
+
+    from gitbot.activity import tracker
 
     sdk_tools = []
     for schema in TOOL_SCHEMAS:
@@ -49,6 +52,11 @@ def _build_gitlab_mcp_server(project_id: int):
 
         def make_handler(tool_name: str):
             async def handler(args: dict):
+                if wf_id:
+                    tracker.tool_called(wf_id)
+                    tracker.log("info", f"tool: {tool_name}", wf_id)
+                if progress is not None:
+                    progress.note(tool_name, args)
                 # execute_tool is sync (python-gitlab) — keep the loop responsive
                 result = await asyncio.to_thread(
                     execute_tool, tool_name, dict(args), project_id=project_id
@@ -67,16 +75,91 @@ def _build_gitlab_mcp_server(project_id: int):
     return create_sdk_mcp_server(name="gitlab", version="1.0.0", tools=sdk_tools)
 
 
-async def run_mention(sit: Situation) -> str:
+class Progress:
+    """Harness-side liveness: periodically updates the placeholder comment with
+    the latest activity, so the issue shows progress even if the agent never
+    posts a comment itself."""
+
+    INTERVAL = 60  # seconds between placeholder updates
+
+    def __init__(self, sit: Situation, placeholder_id: int | None):
+        self.sit = sit
+        self.placeholder_id = placeholder_id
+        self.started = None
+        self.last_action = "starting up"
+        self.actions = 0
+        self._task: asyncio.Task | None = None
+
+    def note(self, tool_name: str, args: dict | None = None) -> None:
+        self.actions += 1
+        detail = ""
+        if args:
+            pid = args.get("project_id")
+            if pid:
+                detail = f" (project {pid})"
+        self.last_action = f"{tool_name}{detail}"
+
+    async def _loop(self) -> None:
+        import time
+
+        from gitbot import gitlab_client as glc
+
+        while True:
+            await asyncio.sleep(self.INTERVAL)
+            if not self.placeholder_id:
+                continue
+            mins = int((time.monotonic() - self.started) / 60)
+            body = (f":hourglass_flowing_sand: **GitBot is working...** "
+                    f"({mins} min, {self.actions} actions — "
+                    f"latest: `{self.last_action}`)")
+            try:
+                if self.sit.target_type == "Issue":
+                    await asyncio.to_thread(
+                        glc.update_note_on_issue, self.sit.project_id,
+                        self.sit.target_iid, self.placeholder_id, body)
+                elif self.sit.target_type == "MergeRequest":
+                    await asyncio.to_thread(
+                        glc.update_note_on_mr, self.sit.project_id,
+                        self.sit.target_iid, self.placeholder_id, body)
+            except Exception:
+                log.debug("Progress heartbeat update failed", exc_info=True)
+
+    def start(self) -> None:
+        import time
+        self.started = time.monotonic()
+        self._task = asyncio.create_task(self._loop())
+
+    def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+
+
+def _progress_hook(progress: Progress):
+    """PostToolUse hook: count built-in tool activity (file ops, Bash) so the
+    heartbeat reflects work that doesn't pass through the GitLab MCP server."""
+    async def on_tool(input_data, tool_use_id, context):
+        if input_data.get("hook_event_name") != "PostToolUse":
+            return {}
+        name = input_data.get("tool_name", "")
+        if name and not name.startswith("mcp__"):
+            progress.note(name)
+        return {}
+    return on_tool
+
+
+async def run_mention(sit: Situation, wf_id: str = "",
+                      placeholder_id: int | None = None) -> str:
     """Run the mention/respond workflow as a single SDK agentic loop.
 
     Returns the agent's final text (posted as the reply by the caller).
     """
-    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage, query
 
     # The SDK subprocess authenticates via ANTHROPIC_API_KEY
     if settings.anthropic_api_key:
         os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+
+    progress = Progress(sit, placeholder_id)
 
     options = ClaudeAgentOptions(
         system_prompt=MENTION_SYSTEM.format(
@@ -87,12 +170,13 @@ async def run_mention(sit: Situation) -> str:
             project_id=sit.project_id,
         ),
         model="claude-sonnet-4-6",
-        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
+        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, wf_id, progress)},
         allowed_tools=["mcp__gitlab__*", "WebSearch", "WebFetch"],
         permission_mode="dontAsk",  # deny anything not explicitly allowed
         max_turns=MAX_TURNS,
         setting_sources=[],  # don't load any .claude settings from disk
         cwd=settings.state_db_path.rsplit("/", 1)[0] or ".",
+        hooks={"PostToolUse": [HookMatcher(hooks=[_progress_hook(progress)])]},
     )
 
     prompt_parts = []
@@ -107,12 +191,16 @@ async def run_mention(sit: Situation) -> str:
              sit.target_type, sit.target_iid, MAX_TURNS)
 
     final_text = ""
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, ResultMessage):
-            final_text = message.result or ""
-            cost = getattr(message, "total_cost_usd", None)
-            log.info("SDK engine: done (subtype=%s, cost=%s)",
-                     getattr(message, "subtype", "?"), cost)
+    progress.start()
+    try:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, ResultMessage):
+                final_text = message.result or ""
+                cost = getattr(message, "total_cost_usd", None)
+                log.info("SDK engine: done (subtype=%s, cost=%s)",
+                         getattr(message, "subtype", "?"), cost)
+    finally:
+        progress.stop()
 
     return final_text or "*(no response produced)*"
 
@@ -332,7 +420,8 @@ def _verify_implement(project_id: int, issue_iid: int, branch_name: str) -> tupl
             "commits": len(commits)}, ""
 
 
-async def run_implement(sit: Situation) -> tuple[str, bool]:
+async def run_implement(sit: Situation, wf_id: str = "",
+                        placeholder_id: int | None = None) -> tuple[str, bool]:
     """Run the implement workflow: clone → SDK loop → verify.
 
     Returns (markdown_summary, success). The summary is posted by the caller;
@@ -346,6 +435,7 @@ async def run_implement(sit: Situation) -> tuple[str, bool]:
     if settings.anthropic_api_key:
         os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
 
+    progress = Progress(sit, placeholder_id)
     branch_name = f"gitbot/issue-{sit.target_iid}"
     workdir = tempfile.mkdtemp(prefix=f"gitbot-impl-{sit.project_id}-{sit.target_iid}-")
 
@@ -381,6 +471,10 @@ async def run_implement(sit: Situation) -> tuple[str, bool]:
             hooks = {"PreToolUse": [HookMatcher(matcher="Bash",
                                                 hooks=[_bash_policy_hook()])]}
 
+    from claude_agent_sdk import HookMatcher as _HM
+    hooks = hooks or {}
+    hooks["PostToolUse"] = [_HM(hooks=[_progress_hook(progress)])]
+
     options = ClaudeAgentOptions(
         system_prompt=system_prompt.format(
             target_iid=sit.target_iid,
@@ -390,7 +484,7 @@ async def run_implement(sit: Situation) -> tuple[str, bool]:
             branch_name=branch_name,
         ),
         model="claude-sonnet-4-6",
-        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
+        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, wf_id, progress)},
         allowed_tools=allowed,
         permission_mode="dontAsk",
         max_turns=IMPLEMENT_MAX_TURNS,
@@ -409,6 +503,7 @@ async def run_implement(sit: Situation) -> tuple[str, bool]:
              sit.target_iid, branch_name)
 
     final_text = ""
+    progress.start()
     try:
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, ResultMessage):
@@ -427,6 +522,7 @@ async def run_implement(sit: Situation) -> tuple[str, bool]:
                 return (f":warning: **GitBot edited files but publishing failed**: "
                         f"{err}\n\nAgent's report:\n\n{final_text}"), False
     finally:
+        progress.stop()
         shutil.rmtree(workdir, ignore_errors=True)
 
     if final_text.strip().startswith("BLOCKED"):
@@ -489,7 +585,8 @@ Rules:
 """
 
 
-async def run_orchestrate(sit: Situation) -> tuple[str, bool]:
+async def run_orchestrate(sit: Situation, wf_id: str = "",
+                          placeholder_id: int | None = None) -> tuple[str, bool]:
     """Run a multi-project orchestration task as a single SDK loop.
 
     There is no structural gate (the task shape is arbitrary) — success is
@@ -503,16 +600,18 @@ async def run_orchestrate(sit: Situation) -> tuple[str, bool]:
     if settings.anthropic_api_key:
         os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
 
+    progress = Progress(sit, placeholder_id)
     workdir = tempfile.mkdtemp(prefix=f"gitbot-orch-{sit.project_id}-{sit.target_iid}-")
 
     allowed = ["Read", "Write", "Edit", "Glob", "Grep",
                "mcp__gitlab__*", "WebSearch", "WebFetch"]
-    hooks = None
+    hooks = {}
     if settings.local_exec != "none":
         allowed.insert(5, "Bash")
         if settings.local_exec != "full":
-            hooks = {"PreToolUse": [HookMatcher(matcher="Bash",
-                                                hooks=[_bash_policy_hook()])]}
+            hooks["PreToolUse"] = [HookMatcher(matcher="Bash",
+                                               hooks=[_bash_policy_hook()])]
+    hooks["PostToolUse"] = [HookMatcher(hooks=[_progress_hook(progress)])]
 
     options = ClaudeAgentOptions(
         system_prompt=ORCHESTRATE_SYSTEM.format(
@@ -523,7 +622,7 @@ async def run_orchestrate(sit: Situation) -> tuple[str, bool]:
             project_id=sit.project_id,
         ),
         model="claude-sonnet-4-6",
-        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
+        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, wf_id, progress)},
         allowed_tools=allowed,
         permission_mode="dontAsk",
         max_turns=ORCHESTRATE_MAX_TURNS,
@@ -541,6 +640,7 @@ async def run_orchestrate(sit: Situation) -> tuple[str, bool]:
              sit.target_iid, ORCHESTRATE_MAX_TURNS)
 
     final_text = ""
+    progress.start()
     try:
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, ResultMessage):
@@ -549,6 +649,7 @@ async def run_orchestrate(sit: Situation) -> tuple[str, bool]:
                          getattr(message, "subtype", "?"),
                          getattr(message, "total_cost_usd", None))
     finally:
+        progress.stop()
         import shutil
         shutil.rmtree(workdir, ignore_errors=True)
 

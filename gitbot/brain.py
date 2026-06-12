@@ -160,7 +160,8 @@ async def decide_and_act(sit: Situation) -> None:
 
     wf_id = str(uuid.uuid4())[:8]
     target_str = f"{sit.target_type} #{sit.target_iid}"
-    wf = tracker.start_workflow(wf_id, sit.trigger, target_str, sit.project_name)
+    wf = tracker.start_workflow(wf_id, sit.trigger, target_str, sit.project_name,
+                                target_url=sit.target_web_url)
     tracker.log("info", f"Started: {target_str} ({sit.trigger})", wf_id)
 
     # Track in state DB so we can resume on restart
@@ -184,7 +185,7 @@ async def decide_and_act(sit: Situation) -> None:
                 tracker.add_phase(wf_id, "agent")
                 tracker.log("info", "Running SDK agent loop (mention)...", wf_id)
                 _set_working_label(sit)
-                sdk_result = await engine_sdk.run_mention(sit)
+                sdk_result = await engine_sdk.run_mention(sit, wf_id, placeholder_id)
 
             elif sit.target_type == "Issue" and sit.trigger == "assigned":
                 from gitbot import engine_sdk
@@ -193,9 +194,11 @@ async def decide_and_act(sit: Situation) -> None:
                 tracker.log("info", f"Running SDK agent loop ({kind})...", wf_id)
                 _set_working_label(sit)
                 if kind == "orchestrate":
-                    sdk_result, sdk_ok = await engine_sdk.run_orchestrate(sit)
+                    sdk_result, sdk_ok = await engine_sdk.run_orchestrate(
+                        sit, wf_id, placeholder_id)
                 else:
-                    sdk_result, sdk_ok = await engine_sdk.run_implement(sit)
+                    sdk_result, sdk_ok = await engine_sdk.run_implement(
+                        sit, wf_id, placeholder_id)
 
             if sdk_result is not None:
                 _update_placeholder(sit, placeholder_id, sdk_result)
