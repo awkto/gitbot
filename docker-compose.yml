@@ -9,14 +9,8 @@ services:
       - GITBOT_GITLAB_TOKEN=${GITBOT_GITLAB_TOKEN}
       - GITBOT_BOT_USERNAME=${GITBOT_BOT_USERNAME:-gitbot}
       - GITBOT_GITLAB_SSL_VERIFY=${GITBOT_GITLAB_SSL_VERIFY:-true}
-      # LLM keys — set whichever you have
-      - GITBOT_ANTHROPIC_API_KEY=${GITBOT_ANTHROPIC_API_KEY:-}
-      - GITBOT_GEMINI_API_KEY=${GITBOT_GEMINI_API_KEY:-}
-      - GITBOT_OPENAI_API_KEY=${GITBOT_OPENAI_API_KEY:-}
-      - GITBOT_OLLAMA_URL=${GITBOT_OLLAMA_URL:-}
-      - GITBOT_VLLM_URL=${GITBOT_VLLM_URL:-}
-      # Active provider (defaults to first available key)
-      - GITBOT_LLM_FAMILY=${GITBOT_LLM_FAMILY:-}
+      # Anthropic
+      - GITBOT_ANTHROPIC_API_KEY=${GITBOT_ANTHROPIC_API_KEY}
     volumes:
       - gitbot-data:/app/data
     restart: unless-stopped

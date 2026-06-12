@@ -1,11 +1,11 @@
 """Claude Agent SDK engine — single agentic loop per workflow.
 
-Spike scope (github/gitbot#19): the mention/respond workflow runs through the
-SDK when GITBOT_ENGINE=sdk. The legacy brain remains the default engine.
+The SDK runs the inner loop (planning, tool sequencing, adaptation); we
+supply the GitLab tools as an in-process MCP server and keep the outer
+harness (webhooks, triage, locks, labels, placeholder UX) in brain.py.
 
-The SDK runs the loop (planning, tool sequencing, adaptation); we supply the
-GitLab tools as an in-process MCP server and keep the surrounding harness
-(webhooks, triage, locks, placeholder UX) unchanged.
+Workflows: mention (answer callouts), implement (issue → branch + MR),
+orchestrate (multi-project/admin/CI), review (MR → inline findings + verdict).
 """
 
 import asyncio
@@ -1203,6 +1203,21 @@ async def run_review(sit: Situation, wf_id: str = "",
 # Assigned-issue triage: single-repo code change vs orchestration
 # ---------------------------------------------------------------------------
 
+async def _classify_complete(system: str, prompt: str) -> str:
+    """One-shot Haiku completion for the triage classifiers — the only LLM
+    calls outside the Agent SDK loops."""
+    from anthropic import AsyncAnthropic
+
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    msg = await client.messages.create(
+        model=settings.classifier_model,
+        max_tokens=32,
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+
+
 CLASSIFY_COMMENT_PROMPT = """\
 A user commented on a GitLab issue where a bot is participating. Decide how
 the bot should treat the comment:
@@ -1232,12 +1247,8 @@ async def classify_comment(sit: Situation) -> str:
     """Cheap triage for comment callouts: 'answer' (just reply, no labels, no
     takeover), 'steer' (resume the issue's work incorporating the comment) or
     'task' (treat like being freshly assigned the work)."""
-    from gitbot import llm
-    from gitbot.models import Task
-
     try:
-        raw = await llm.complete(
-            Task.CLASSIFY,
+        raw = await _classify_complete(
             system="You are a precise classifier. Answer in the exact format requested.",
             prompt=CLASSIFY_COMMENT_PROMPT.format(
                 title=sit.target_title,
@@ -1277,12 +1288,8 @@ Example: orchestrate 7"""
 async def classify_assigned_issue(sit: Situation) -> str:
     """Cheap triage: 'implement' or 'orchestrate' (+ complexity score,
     stashed on sit.task_complexity for auto model selection)."""
-    from gitbot import llm
-    from gitbot.models import Task
-
     try:
-        raw = await llm.complete(
-            Task.CLASSIFY,
+        raw = await _classify_complete(
             system="You are a precise classifier. Answer in the exact format requested.",
             prompt=CLASSIFY_PROMPT.format(
                 title=sit.target_title,

@@ -1,6 +1,8 @@
 # GitBot
 
-AI-powered GitLab team member. Assign issues, request reviews, @mention for help — GitBot responds like a real developer.
+A Claude-powered agent that works as a GitLab team member. Assign issues, request reviews, @mention for help — GitBot responds like a real developer.
+
+Built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk): the SDK runs the agent loop, GitBot supplies the GitLab tools, workflows, and durability.
 
 ## Quick Start
 
@@ -12,8 +14,7 @@ docker run -d \
   -e GITBOT_GITLAB_URL=https://gitlab.example.com \
   -e GITBOT_GITLAB_TOKEN=glpat-xxxxxxxxxxxx \
   -e GITBOT_BOT_USERNAME=gitbot \
-  -e GITBOT_LLM_FAMILY=gemini \
-  -e GITBOT_LLM_API_KEY=AIza... \
+  -e GITBOT_ANTHROPIC_API_KEY=sk-ant-... \
   awkto/gitbot:latest
 ```
 
@@ -21,11 +22,11 @@ Then add a webhook in your GitLab project/group pointing to `http://your-host:80
 
 ## What It Does
 
-- **Assigned an issue** — triages, asks clarifying questions if needed, creates a branch + MR with code
-- **Assigned as MR reviewer** — performs a code review with severity markers
-- **@mentioned in a comment** — responds helpfully, answers questions
-- **Comment on bot's MR** — pushes new commits to the branch (no @mention needed)
-- **Complex requests** — breaks work into sub-issues, creates epics/milestones, manages projects
+- **Assigned an issue** — triages it (code change vs. orchestration), researches, asks a clarifying question only when it matters, then implements: branch + commits + merge request
+- **Assigned as MR reviewer** — reviews the diff in context of the full checkout, posts severity-marked inline findings (🔴🟠🟡🔵) and a verdict
+- **@mentioned in a comment** — answers in a threaded reply; comments that steer or request work resume/start the real workflow
+- **Complex requests** — multi-project orchestration: creates projects, CI/CD pipelines, epics/milestones, waits on pipelines, verifies each step
+- **Survives restarts** — labels + a state DB let interrupted work resume exactly where it left off; every session keeps to a single comment thread
 
 ## Configuration
 
@@ -36,16 +37,18 @@ All config via environment variables:
 | `GITBOT_GITLAB_URL` | Yes | `https://gitlab.com` | GitLab instance URL |
 | `GITBOT_GITLAB_TOKEN` | Yes | | Personal access token for the bot user |
 | `GITBOT_BOT_USERNAME` | Yes | `gitbot` | GitLab username of the bot account |
-| `GITBOT_LLM_FAMILY` | Yes | `claude-code` | LLM provider: `anthropic`, `gemini`, `openai`, `ollama`, `claude-code` |
-| `GITBOT_LLM_API_KEY` | Yes* | | API key for the LLM provider |
+| `GITBOT_ANTHROPIC_API_KEY` | Yes | | Anthropic API key |
 | `GITBOT_WEBHOOK_SECRET` | No | | Webhook secret token for verification |
 | `GITBOT_GITLAB_SSL_VERIFY` | No | `true` | Set `false` for self-signed certs |
 | `GITBOT_ADMIN_ENABLED` | No | `true` | Enable admin panel at `/admin` |
-| `GITBOT_LLM_MODEL_CHEAP` | No | | Override cheap tier model |
-| `GITBOT_LLM_MODEL_MID` | No | | Override mid tier model |
-| `GITBOT_LLM_MODEL_STRONG` | No | | Override strong tier model |
+| `GITBOT_LOCAL_EXEC` | No | `light` | Shell policy in the agent workspace: `none`, `light`, `full` |
+| `GITBOT_QUESTION_THRESHOLD` | No | `7` | How important (1-10) a question must be before asking the user |
+| `GITBOT_RECONCILE_MINUTES` | No | `10` | Sweep interval for resuming orphaned/parked work (0 = off) |
+| `GITBOT_MODEL_MENTION` / `_IMPLEMENT` / `_ORCHESTRATE` / `_REVIEW` | No | `auto` | Per-workflow model: `auto`, `haiku`, `sonnet`, `opus`, or a pinned id |
 
-*Not required for `claude-code` or `ollama` families.
+## Model Selection
+
+`auto` (the default) lets GitBot decide: a cheap triage call scores each task's complexity 1-10 and the harness picks the tier — trivial mentions run on Haiku, typical work on Sonnet, reviews and complex orchestration on Opus. The tier aliases resolve to the current model of each tier, so there is nothing to update when new Claude models ship. Override per workflow in the admin panel (or pin an exact model id); reset back to `auto` anytime.
 
 ## Persistence
 
@@ -59,23 +62,11 @@ Mount `/app/data` to persist the SQLite state database across restarts. This sto
 -v /path/on/host/gitbot-data:/app/data
 ```
 
-## LLM Providers
-
-| Provider | Family | Cheap | Mid | Strong |
-|---|---|---|---|---|
-| **Google Gemini** | `gemini` | 2.5 Flash | 2.5 Pro | 2.5 Pro |
-| **Anthropic** | `anthropic` | Haiku 4.5 | Sonnet 4.6 | Opus 4.8 |
-| **OpenAI** | `openai` | GPT-4o-mini | GPT-4o | GPT-4o |
-| **Ollama** | `ollama` | Qwen 2.5 7B | Qwen 2.5 32B | Qwen 2.5 32B |
-| **Claude Code CLI** | `claude-code` | CLI | CLI | CLI |
-
-The bot uses three model tiers: **cheap** (triage/context gathering), **mid** (planning/code/assignments), **strong** (code review/architecture). The brain dynamically selects the tier per task step.
-
 ## Admin Panel
 
 Access the admin panel at `http://your-host:8042/admin` to:
-- View connection status for GitLab and LLM
-- Test connectivity
+- View connection status for GitLab and the Anthropic API
+- Tune the ask-threshold and per-workflow models live
 - Monitor active workflows with live progress
 - View activity feed and workflow history
 
@@ -84,13 +75,17 @@ Disable with `GITBOT_ADMIN_ENABLED=false`.
 ## Architecture
 
 ```
-Webhook → Gather (cheap) → Plan (mid) → Execute (model per step)
+Webhook → triage (Haiku) → one Agent SDK session per task
+            │                  ├─ mention      answer in-thread
+            │                  ├─ implement    clone → branch → MR (verified)
+            │                  ├─ orchestrate  multi-project / CI / admin
+            │                  └─ review       inline findings + verdict
+            └─ labels + state DB → reconcile sweep resumes interrupted work
 ```
 
-1. **Gather** — cheapest model fetches only the context needed
-2. **Plan** — breaks task into atomic steps, assigns model tier per step
-3. **Execute** — each step runs with 37 GitLab tools via native LLM tool calling
-4. **Escalate** — if a step fails, automatically retries with a stronger model
+- **One session = one comment thread** — the first comment is the anchor (edited in place for status and the final report); everything else is a threaded reply.
+- **Finish gates** — implement only reports success after the API confirms an open MR with commits; finish states `BLOCKED` / `WAITING` / `NEEDS_INPUT` park work cleanly.
+- **Not a devbox** — by default the container denies installs/docker/network tools in agent shells; builds and tests belong to your GitLab CI/CD pipelines.
 
 ## GitLab Setup
 
@@ -111,8 +106,7 @@ services:
       - GITBOT_GITLAB_URL=https://gitlab.example.com
       - GITBOT_GITLAB_TOKEN=glpat-xxxxxxxxxxxx
       - GITBOT_BOT_USERNAME=gitbot
-      - GITBOT_LLM_FAMILY=gemini
-      - GITBOT_LLM_API_KEY=AIza...
+      - GITBOT_ANTHROPIC_API_KEY=sk-ant-...
     volumes:
       - gitbot-data:/app/data
     restart: unless-stopped

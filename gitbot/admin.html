@@ -116,18 +116,6 @@
       <label>GitLab Token<br><input id="cfgGitlabToken" type="password" placeholder="glpat-xxx"></label>
       <label>Bot Username<br><input id="cfgBotUsername" placeholder="gitbot"></label>
       <label>Anthropic Key<br><input id="cfgAnthropicKey" type="password" placeholder="sk-ant-..."></label>
-      <label>Gemini Key<br><input id="cfgGeminiKey" type="password" placeholder="AIza..."></label>
-      <label>OpenAI Key<br><input id="cfgOpenaiKey" type="password" placeholder="sk-..."></label>
-      <label>Ollama / vLLM URL<br><input id="cfgOllamaUrl" placeholder="http://localhost:11434"></label>
-      <label>Active Provider<br>
-        <select id="cfgLlmFamily">
-          <option value="">First available key</option>
-          <option value="anthropic">Anthropic (Claude)</option>
-          <option value="gemini">Google Gemini</option>
-          <option value="openai">OpenAI</option>
-          <option value="ollama">Ollama / vLLM</option>
-        </select>
-      </label>
       <label>SSL Verify<br>
         <select id="cfgSslVerify"><option value="true">Yes</option><option value="false">No (self-signed)</option></select>
       </label>
@@ -215,7 +203,7 @@ async function fetchStats() {
     document.getElementById('configRow').innerHTML = `
       <div class="config-item"><div class="label">GitLab</div>${d.config.gitlab_url} <span class="badge ${d.config.gitlab_connected?'ok':'error'}">${d.config.gitlab_connected?'connected':'no token'}</span></div>
       <div class="config-item"><div class="label">Bot</div>@${d.config.bot_username}</div>
-      <div class="config-item"><div class="label">LLM</div>${d.config.llm_family} <span class="badge ${d.config.llm_configured?'ok':'error'}">${d.config.llm_configured?'ready':'no key'}</span></div>
+      <div class="config-item"><div class="label">LLM</div>Claude <span class="badge ${d.config.llm_configured?'ok':'error'}">${d.config.llm_configured?'ready':'no key'}</span></div>
       <div class="config-item" title="How important (1-10) a clarifying question must be before GitBot asks the user instead of assuming. 10 = almost never ask.">
         <div class="label">Ask threshold</div>
         <input id="qThresh" type="number" min="1" max="10" value="${d.config.question_threshold ?? 7}"
@@ -396,10 +384,6 @@ async function saveConfig() {
     gitlab_token: document.getElementById('cfgGitlabToken').value,
     bot_username: document.getElementById('cfgBotUsername').value || 'gitbot',
     anthropic_api_key: document.getElementById('cfgAnthropicKey').value,
-    gemini_api_key: document.getElementById('cfgGeminiKey').value,
-    openai_api_key: document.getElementById('cfgOpenaiKey').value,
-    ollama_url: document.getElementById('cfgOllamaUrl').value,
-    llm_family: document.getElementById('cfgLlmFamily').value,
     gitlab_ssl_verify: document.getElementById('cfgSslVerify').value,
   };
   Object.keys(data).forEach(k => { if (!data[k]) delete data[k]; });

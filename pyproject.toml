@@ -1,13 +1,13 @@
 [project]
 name = "gitbot"
 version = "0.1.0"
-description = "AI bot that works as a GitLab team member"
+description = "GitBot — a Claude-powered agent that works as a GitLab team member"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "python-gitlab>=5.0",
-    "litellm>=1.55",
+    "anthropic>=0.45",
     "claude-agent-sdk>=0.2.97",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",

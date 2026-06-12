@@ -9,7 +9,6 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from gitbot.config import settings
-from gitbot.models import Family
 from gitbot.router import route_event
 from gitbot.todos import process_pending_todos, resume_incomplete_work
 from gitbot.activity import tracker
@@ -34,8 +33,8 @@ async def lifespan(app: FastAPI):
     if settings.setup_needed:
         log.warning("GitBot is not configured. Visit /admin to set up.")
     else:
-        log.info("GitLab: %s as @%s | LLM: %s",
-                 settings.gitlab_url, settings.bot_username, settings.get_llm_family())
+        log.info("GitLab: %s as @%s | classifier: %s",
+                 settings.gitlab_url, settings.bot_username, settings.classifier_model)
 
     log.info("Checking for pending todos (crash recovery)...")
     try:
@@ -155,10 +154,8 @@ async def admin_stats():
     stats["config"] = {
         "gitlab_url": settings.gitlab_url,
         "bot_username": settings.bot_username,
-        "llm_family": str(settings.get_llm_family()),
         "gitlab_connected": bool(settings.gitlab_token),
-        "llm_configured": settings.is_configured or settings.get_llm_family() == Family.CLAUDE_CODE,
-        "available_providers": settings.available_providers,
+        "llm_configured": bool(settings.anthropic_api_key),
         "setup_needed": settings.setup_needed,
         "question_threshold": settings.question_threshold,
         "workflow_models": {
@@ -211,12 +208,7 @@ async def admin_save_config(request: Request):
         "bot_username": "GITBOT_BOT_USERNAME",
         "gitlab_ssl_verify": "GITBOT_GITLAB_SSL_VERIFY",
         "webhook_secret": "GITBOT_WEBHOOK_SECRET",
-        "llm_family": "GITBOT_LLM_FAMILY",
         "anthropic_api_key": "GITBOT_ANTHROPIC_API_KEY",
-        "gemini_api_key": "GITBOT_GEMINI_API_KEY",
-        "openai_api_key": "GITBOT_OPENAI_API_KEY",
-        "ollama_url": "GITBOT_OLLAMA_URL",
-        "vllm_url": "GITBOT_VLLM_URL",
         "admin_enabled": "GITBOT_ADMIN_ENABLED",
     }
     for field, env_var in field_map.items():
@@ -290,9 +282,8 @@ async def admin_test_gitlab():
 async def admin_test_llm():
     _check_admin()
     try:
-        from gitbot import llm
-        from gitbot.models import Task
-        result = await llm.complete(Task.TRIAGE, system="Say OK", prompt="Test")
-        return {"status": "ok", "model": settings.get_llm_family(), "response": result[:100]}
+        from gitbot.engine_sdk import _classify_complete
+        result = await _classify_complete(system="Say OK", prompt="Test")
+        return {"status": "ok", "model": settings.classifier_model, "response": result[:100]}
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
