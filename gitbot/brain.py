@@ -173,6 +173,12 @@ async def decide_and_act(sit: Situation) -> None:
 
     placeholder_id = _post_placeholder(sit)
 
+    # Pure answer sessions (comment callouts) must not touch labels: clearing
+    # them at the end could erase gitbot::waiting/queued that a parked task
+    # depends on. Sessions own labels only if they set them (assignment
+    # placeholder, or a comment that escalates to task/steer work).
+    owns_labels = sit.event_type != "Note Hook"
+
     try:
         # SDK engine (#19/#20): mention and implement workflows through a
         # single Claude Agent SDK loop. Other workflows still use the legacy brain.
@@ -180,8 +186,9 @@ async def decide_and_act(sit: Situation) -> None:
             sdk_result: str | None = None
             sdk_ok = True
 
-            if (sit.trigger in ("mentioned", "comment") and sit.pending_question
-                    and sit.target_type == "Issue"):
+            if (sit.trigger in ("mentioned", "comment")
+                    and sit.target_type == "Issue"
+                    and _answers_pending_question(sit)):
                 # Reply to a question the bot asked — continue the parked task
                 # with the answer in context, not a conversational response.
                 from gitbot import engine_sdk
@@ -190,6 +197,7 @@ async def decide_and_act(sit: Situation) -> None:
                 tracker.add_phase(wf_id, "agent")
                 tracker.log("info", f"Answer received — resuming task ({kind})...", wf_id)
                 _set_working_label(sit)
+                owns_labels = True
                 if kind == "orchestrate":
                     sdk_result, sdk_ok = await engine_sdk.run_orchestrate(
                         sit, wf_id, placeholder_id)
@@ -199,15 +207,19 @@ async def decide_and_act(sit: Situation) -> None:
 
             elif sit.trigger in ("mentioned", "comment"):
                 from gitbot import engine_sdk
-                # Side question vs work request: a plain answer must not churn
-                # labels or take over the issue; a work request is handled
-                # like an assignment (labels, task workflow, finish states).
+                # Comment intent triage: a plain answer must not churn labels
+                # or take over the issue; "steer" adjusts/continues the
+                # issue's existing work (resume-style, adopting prior state);
+                # "task" is a fresh work request handled like an assignment.
                 intent = await engine_sdk.classify_comment(sit)
                 tracker.add_phase(wf_id, "agent")
-                if intent == "task":
+                if intent in ("task", "steer"):
+                    if intent == "steer":
+                        sit.is_replay = True  # adopt existing state, don't restart
                     kind = await engine_sdk.classify_assigned_issue(sit)
-                    tracker.log("info", f"Comment is a work request — running {kind}...", wf_id)
+                    tracker.log("info", f"Comment is a work request ({intent}) — running {kind}...", wf_id)
                     _set_working_label(sit)
+                    owns_labels = True
                     if kind == "orchestrate":
                         sdk_result, sdk_ok = await engine_sdk.run_orchestrate(
                             sit, wf_id, placeholder_id)
@@ -248,11 +260,13 @@ async def decide_and_act(sit: Situation) -> None:
                     _clear_labels(sit)
                     _set_label(sit, "gitbot::needs-input")
                     state.set_pending_response(
-                        work_id, question=sdk_result[:500], asked_user=sit.actor)
+                        work_id, question=sdk_result[:500], asked_user=sit.actor,
+                        discussion_id=sit.session_discussion_id)
                     tracker.log("info", f"Asked for input: {target_str}", wf_id)
                     tracker.finish_workflow(wf_id, "completed")
                     return
-                _clear_labels(sit)
+                if owns_labels:
+                    _clear_labels(sit)
                 status = "completed" if sdk_ok else "failed"
                 tracker.log("info", f"Completed (sdk, {status}): {target_str}", wf_id)
                 tracker.finish_workflow(wf_id, status)
@@ -364,12 +378,14 @@ async def decide_and_act(sit: Situation) -> None:
                 tracker.store_debug_log(wf_id, debug_text)
             _post_failure_comment(sit, placeholder_id, "error", error_str, wf_id=wf_id)
 
-        _clear_labels(sit)
+        if owns_labels:
+            _clear_labels(sit)
         state.fail_work_item(work_id)
 
     finally:
-        # Clean up pending question if we acted
-        if sit.pending_question:
+        # Close out the pending question only if this session consumed its
+        # answer — an unrelated mention must not discard an open question.
+        if sit.pending_question and _answers_pending_question(sit):
             state.complete_work_item(sit.pending_question["id"])
 
 
@@ -816,7 +832,7 @@ def _should_skip(sit: Situation) -> bool:
     if sit.event_type == "Note Hook":
         has_mention = f"@{sit.bot_username}" in sit.comment_body
         has_pending = sit.pending_question is not None
-        is_asked_user = has_pending and sit.actor == sit.pending_question.get("asked_user")
+        answers_pending = _answers_pending_question(sit)
 
         has_role = sit.bot_is_assignee or sit.bot_is_reviewer or sit.bot_is_author
         if not has_role and sit.target_type == "MergeRequest" and sit.target_iid:
@@ -829,11 +845,12 @@ def _should_skip(sit: Situation) -> bool:
             except Exception:
                 pass
 
-        if not has_mention and not has_role and not is_asked_user:
+        if not has_mention and not has_role and not answers_pending:
             log.debug("Ignoring note — no relationship and no pending question")
             return True
-        if has_pending and not is_asked_user and not has_mention:
-            log.debug("Ignoring note — pending question but from different user")
+        if has_pending and not answers_pending and not has_mention:
+            log.debug("Ignoring note — pending question, but comment is neither "
+                      "in its thread nor from the asked user")
             return True
 
     if sit.event_type == "Merge Request Hook" and sit.bot_is_author:
@@ -844,32 +861,61 @@ def _should_skip(sit: Situation) -> bool:
     return False
 
 
+def _answers_pending_question(sit: Situation) -> bool:
+    """Does this comment answer a question the bot asked (github/gitbot#27)?
+
+    Two ways to answer, no @mention required:
+    - a reply in the thread where the question was asked (any user — a
+      teammate can answer on the requester's behalf), or
+    - any comment on the target by the user the question was addressed to.
+    """
+    if not sit.pending_question:
+        return False
+    question_thread = (sit.pending_question.get("context") or {}).get("discussion_id")
+    if question_thread and sit.discussion_id == question_thread:
+        return True
+    return sit.actor == sit.pending_question.get("asked_user")
+
+
 def _post_placeholder(sit: Situation) -> int | None:
+    """Open the session's one comment thread.
+
+    One session = one thread: the note created here is the anchor (edited in
+    place for status and the final report); everything else the bot says
+    during the session is a reply into this thread. No further top-level
+    comments are ever posted.
+    """
     # Comment callouts don't get a thinking label: a side question must not
     # mark the issue as bot-owned work (labels also drive crash recovery —
     # an interrupted answer should not resurrect the whole issue as a task).
     set_label = sit.event_type != "Note Hook"
     try:
-        body = ":hourglass_flowing_sand: **GitBot is thinking...**"
-        # Reply in the triggering comment's thread so the whole exchange stays
-        # threaded, rather than dropping a separate top-level comment.
+        if sit.trigger == "resumed":
+            body = ":arrows_counterclockwise: **GitBot is resuming this task...**"
+        else:
+            body = ":hourglass_flowing_sand: **GitBot is thinking...**"
+        # Comment-triggered sessions live in the triggering comment's thread.
         if sit.event_type == "Note Hook" and sit.discussion_id:
+            sit.session_discussion_id = sit.discussion_id
             note_id = glc.reply_to_discussion(
                 sit.project_id, sit.target_type, sit.target_iid,
                 sit.discussion_id, body)
             return note_id
-        if sit.target_type == "Issue":
-            note_id = glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
+        # Assignment-triggered sessions start their own thread.
+        if sit.target_type in ("Issue", "MergeRequest"):
+            discussion_id, note_id = glc.start_discussion(
+                sit.project_id, sit.target_type, sit.target_iid, body)
+            sit.session_discussion_id = discussion_id
             if set_label:
-                glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::thinking"])
-            return note_id
-        elif sit.target_type == "MergeRequest":
-            note_id = glc.post_note_on_mr(sit.project_id, sit.target_iid, body)
-            if set_label:
-                glc.set_mr_labels(sit.project_id, sit.target_iid, ["gitbot::thinking"])
+                if sit.target_type == "Issue":
+                    glc.set_issue_labels(sit.project_id, sit.target_iid,
+                                         ["gitbot::thinking"])
+                else:
+                    glc.set_mr_labels(sit.project_id, sit.target_iid,
+                                      ["gitbot::thinking"])
             return note_id
     except Exception:
-        log.warning("Could not post placeholder")
+        log.warning("Could not post placeholder", exc_info=True)
     return None
 
 
@@ -977,7 +1023,12 @@ def _post_failure_comment(
         _update_placeholder(sit, placeholder_id, body)
     else:
         try:
-            if sit.target_type == "Issue":
+            # Keep the one-thread-per-session rule even on failure.
+            if sit.session_discussion_id:
+                glc.reply_to_discussion(sit.project_id, sit.target_type,
+                                        sit.target_iid,
+                                        sit.session_discussion_id, body)
+            elif sit.target_type == "Issue":
                 glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
             elif sit.target_type == "MergeRequest":
                 glc.post_note_on_mr(sit.project_id, sit.target_iid, body)

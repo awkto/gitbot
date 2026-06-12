@@ -75,6 +75,11 @@ class Situation:
     # situations with no webhook action metadata — bypasses the new-assignment gates.
     is_replay: bool = False
 
+    # The session's discussion thread. One session = one thread: the first
+    # note anchors it (edited in place for status), every other bot comment
+    # is a reply into it. Set by _post_placeholder.
+    session_discussion_id: str = ""
+
     # Pending work from state DB — always available (cheap local lookup)
     pending_question: dict | None = None
 

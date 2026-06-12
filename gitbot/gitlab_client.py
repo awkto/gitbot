@@ -72,6 +72,25 @@ def remove_issue_labels(project_id: int, issue_iid: int, labels: list[str]) -> N
     issue.save()
 
 
+def start_discussion(
+    project_id: int, noteable_type: str, noteable_iid: int, body: str
+) -> tuple[str, int]:
+    """Start a new discussion thread on an issue/MR.
+
+    Returns (discussion_id, first_note_id). The first note anchors the
+    session: edit it for status updates, reply to it for everything else.
+    """
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    if noteable_type == "MergeRequest":
+        noteable = project.mergerequests.get(noteable_iid)
+    else:
+        noteable = project.issues.get(noteable_iid)
+    discussion = noteable.discussions.create({"body": body})
+    first_note = discussion.attributes.get("notes", [{}])[0]
+    return discussion.id, first_note.get("id", 0)
+
+
 def reply_to_discussion(
     project_id: int, noteable_type: str, noteable_iid: int, discussion_id: str, body: str
 ) -> int:

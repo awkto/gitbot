@@ -162,17 +162,21 @@ def _safe_mark_done(todo_id: int) -> None:
 
 _WORKING_LABELS = ["gitbot::working", "gitbot::thinking"]
 _PARKED_LABELS = ["gitbot::waiting"]
+# Deliberate handoff: the agent labels an issue gitbot::queued to say "pick
+# this up as a separate task later" (self-created webhooks are dropped as
+# self-triggered, so without this label such issues would never be worked).
+_QUEUED_LABELS = ["gitbot::queued"]
 
 
 async def reconcile() -> None:
-    """Periodic sweep: resume orphaned (gitbot::working with no live workflow)
-    and parked (gitbot::waiting) items. Safe to run while workflows are active —
-    targets whose lock is currently held are skipped.
+    """Periodic sweep: resume orphaned (gitbot::working with no live workflow),
+    parked (gitbot::waiting) and queued (gitbot::queued) items. Safe to run
+    while workflows are active — targets whose lock is currently held are skipped.
     """
     from gitbot import locks
 
     found: dict[tuple[int, str, int], dict] = {}
-    for label in _WORKING_LABELS + _PARKED_LABELS:
+    for label in _WORKING_LABELS + _PARKED_LABELS + _QUEUED_LABELS:
         try:
             for item in glc.find_items_by_label(label):
                 key = (item["project_id"], item["target_type"], item["target_iid"])
@@ -285,8 +289,23 @@ async def _resume_item(
     sit.target_type = target_type
     sit.target_iid = target_iid
     sit.actor = "system"  # resumed, not a real user event
-    sit.trigger = "resumed"
-    sit.is_replay = True
+
+    queued = info.get("label") in _QUEUED_LABELS
+    if queued:
+        # Deliberately queued work, not interrupted work: run it as a fresh
+        # assignment (no resume framing/snapshot) and consume the label.
+        sit.trigger = "assigned"
+        sit.newly_assigned = True
+        try:
+            if target_type == "Issue":
+                glc.remove_issue_labels(project_id, target_iid, _QUEUED_LABELS)
+            else:
+                glc.remove_mr_labels(project_id, target_iid, _QUEUED_LABELS)
+        except Exception:
+            log.warning("  -> Could not remove queued label")
+    else:
+        sit.trigger = "resumed"
+        sit.is_replay = True
 
     if target_type == "Issue":
         issue = project.issues.get(target_iid)
@@ -326,26 +345,23 @@ async def _resume_item(
         log.info("  -> Don't know how to resume target_type=%s", target_type)
         return
 
-    log.info("  -> Resuming %s #%s: %s", target_type, target_iid, sit.target_title)
+    if queued:
+        # The gitbot::queued label is the explicit handoff signal — honor it
+        # even if the creating session forgot to self-assign the issue.
+        sit.bot_is_assignee = True
 
-    # Post a note so the user knows we're picking this back up
-    try:
-        body = (
-            ":arrows_counterclockwise: **GitBot was restarted and is resuming this task...**"
-        )
-        if target_type == "Issue":
-            glc.post_note_on_issue(project_id, target_iid, body)
-        elif target_type == "MergeRequest":
-            glc.post_note_on_mr(project_id, target_iid, body)
-    except Exception:
-        log.warning("  -> Could not post resume notification")
+    log.info("  -> %s %s #%s: %s", "Starting queued" if queued else "Resuming",
+             target_type, target_iid, sit.target_title)
 
+    # No separate "resuming" comment: each session opens exactly one thread
+    # (the placeholder), whose anchor note announces what's happening.
     await decide_and_act(sit)
 
 
 def _clear_stale_labels(project_id: int, target_type: str, target_iid: int) -> None:
     """Remove gitbot:: labels from a closed/merged item."""
-    labels = ["gitbot::thinking", "gitbot::working", "gitbot::waiting"]
+    labels = ["gitbot::thinking", "gitbot::working", "gitbot::waiting",
+              "gitbot::queued"]
     try:
         if target_type == "Issue":
             glc.remove_issue_labels(project_id, target_iid, labels)

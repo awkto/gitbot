@@ -82,9 +82,16 @@ def set_pending_response(
     question: str,
     asked_user: str,
     context: dict | None = None,
+    discussion_id: str = "",
 ) -> None:
-    """Mark a work item as waiting for a user response."""
+    """Mark a work item as waiting for a user response.
+
+    discussion_id is the thread the question lives in — an untagged reply
+    in that thread counts as the answer (stored in the context JSON).
+    """
     db = _get_db()
+    if discussion_id:
+        context = (context or {}) | {"discussion_id": discussion_id}
     updates = {"status": Status.PENDING_RESPONSE, "question": question,
                "asked_user": asked_user, "updated_at": time.time()}
     if context is not None:

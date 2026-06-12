@@ -20,6 +20,21 @@ from gitbot.tools import TOOL_SCHEMAS, execute_tool
 log = logging.getLogger(__name__)
 
 MAX_TURNS = 40
+MENTION_MAX_TURNS = 12  # answers are cheap: context is pre-fetched, keep it light
+
+
+def _sdk_model(tier=None) -> str:
+    """Model selection is the harness's job, not the SDK's: resolve the
+    configured family/tier (gitbot/models.py + GITBOT_TIER_* overrides) and
+    strip the litellm 'anthropic/' prefix the SDK doesn't use."""
+    from gitbot.models import FAMILY_DEFAULTS, Tier
+
+    tier = tier or Tier.MID
+    family = settings.get_llm_family()
+    overrides = settings.tier_overrides()
+    model = (overrides or {}).get(tier) or FAMILY_DEFAULTS[family][tier]
+    return model.split("/", 1)[-1]
+
 
 def _setup_subprocess_env() -> None:
     """Env for the SDK subprocess (inherited by Bash tools): Anthropic auth
@@ -37,21 +52,92 @@ You are GitBot, an AI teammate inside a GitLab instance. A user mentioned you
 in a comment (or replied to you) on {target_type} #{target_iid} ("{target_title}")
 in project "{project_name}" (ID: {project_id}).
 
-Use the GitLab tools to gather any context you need (conversation history,
-diffs, files, related issues) and to take any actions the user asks for.
+This is a QUESTION/ANSWER interaction, not a work task. The conversation
+context is already provided below — answer directly from it whenever you can.
+You have a small turn budget ({max_turns} turns); use tools only when the
+provided context genuinely doesn't contain the answer.
 
 Rules:
 - When a tool needs a project_id and the user means the current project, use {project_id}.
+- The conversation may span several past runs of work on this issue. Resources
+  mentioned in older comments (projects, branches, pipelines) may have been
+  deleted or replaced since — verify a resource still exists before citing it
+  as current fact in your answer.
 - If a tool returns an error, try a different approach rather than repeating the call.
 - Do NOT use the post_comment tool for your final answer — your final text
-  response is delivered to the user as a comment automatically. Only use
-  post_comment for additional comments on OTHER issues or merge requests.
+  response is delivered to the user as a threaded reply automatically.
 - Be concise and direct. Markdown is supported.
 """
 
 
-def _build_gitlab_mcp_server(project_id: int):
-    """Expose the existing GitLab tool set as an in-process SDK MCP server."""
+def _mention_context(sit: Situation) -> str:
+    """Pre-fetch the conversation so a simple answer needs zero tool calls:
+    the triggering discussion's full thread, plus recent comments elsewhere
+    on the target."""
+    from gitbot import gitlab_client as glc
+
+    parts = []
+    try:
+        gl = glc.get_client()
+        project = gl.projects.get(sit.project_id)
+        if sit.target_type == "MergeRequest":
+            target = project.mergerequests.get(sit.target_iid)
+        else:
+            target = project.issues.get(sit.target_iid)
+
+        if sit.discussion_id:
+            try:
+                disc = target.discussions.get(sit.discussion_id)
+                thread = [
+                    f"@{n.get('author', {}).get('username', '?')}: {n.get('body', '')[:500]}"
+                    for n in disc.attributes.get("notes", []) if not n.get("system")
+                ]
+                if thread:
+                    parts.append("Current thread (oldest first):\n" + "\n\n".join(thread))
+            except Exception:
+                pass
+
+        notes = [n for n in target.notes.list(per_page=15, sort="desc")
+                 if not n.system]
+        recent = [
+            f"[{n.created_at[:16]}] @{n.author.get('username', '?')}: "
+            f"{' '.join(n.body.split())[:250]}"
+            for n in reversed(notes)
+        ]
+        if recent:
+            parts.append("Recent comments on this "
+                         f"{sit.target_type} (oldest first):\n" + "\n".join(recent))
+    except Exception as e:
+        log.warning("Mention context prefetch failed: %s", e)
+    return "\n\n".join(parts)
+
+
+def _post_session_comment(sit: Situation, body: str) -> str:
+    """The agent's post_comment, under the one-thread-per-session rule:
+    every comment the bot makes during a session is a reply in the session's
+    discussion thread — never a new top-level comment."""
+    from gitbot import gitlab_client as glc
+
+    if not body.strip():
+        return "TOOL_ERROR: empty comment body"
+    if sit.session_discussion_id:
+        note_id = glc.reply_to_discussion(
+            sit.project_id, sit.target_type, sit.target_iid,
+            sit.session_discussion_id, body)
+    elif sit.target_type == "MergeRequest":
+        note_id = glc.post_note_on_mr(sit.project_id, sit.target_iid, body)
+    else:
+        note_id = glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
+    return f"Comment posted in the session thread (note_id={note_id})."
+
+
+def _build_gitlab_mcp_server(project_id: int, sit: Situation | None = None):
+    """Expose the existing GitLab tool set as an in-process SDK MCP server.
+
+    post_comment is special-cased: execute_tool treats it as caller-handled
+    (a stub), so the SDK engine must post it itself — threaded into the
+    session discussion when one exists.
+    """
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
     sdk_tools = []
@@ -61,9 +147,16 @@ def _build_gitlab_mcp_server(project_id: int):
         def make_handler(tool_name: str):
             async def handler(args: dict):
                 # execute_tool is sync (python-gitlab) — keep the loop responsive
-                result = await asyncio.to_thread(
-                    execute_tool, tool_name, dict(args), project_id=project_id
-                )
+                if tool_name == "post_comment" and sit is not None:
+                    try:
+                        result = await asyncio.to_thread(
+                            _post_session_comment, sit, str(args.get("body", "")))
+                    except Exception as e:
+                        result = f"TOOL_ERROR: {e}"
+                else:
+                    result = await asyncio.to_thread(
+                        execute_tool, tool_name, dict(args), project_id=project_id
+                    )
                 is_error = isinstance(result, str) and result.startswith("TOOL_ERROR:")
                 return {
                     "content": [{"type": "text", "text": str(result)}],
@@ -207,12 +300,13 @@ async def run_mention(sit: Situation, wf_id: str = "",
             target_title=sit.target_title,
             project_name=sit.project_name,
             project_id=sit.project_id,
+            max_turns=MENTION_MAX_TURNS,
         ),
-        model="claude-sonnet-4-6",
-        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
+        model=_sdk_model(),
+        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
         allowed_tools=["mcp__gitlab__*", "WebSearch", "WebFetch"],
         permission_mode="dontAsk",  # deny anything not explicitly allowed
-        max_turns=MAX_TURNS,
+        max_turns=MENTION_MAX_TURNS,
         setting_sources=[],  # don't load any .claude settings from disk
         cwd=settings.state_db_path.rsplit("/", 1)[0] or ".",
     )
@@ -222,11 +316,14 @@ async def run_mention(sit: Situation, wf_id: str = "",
         prompt_parts.append(
             f"{sit.target_type} #{sit.target_iid} description:\n{sit.target_description}"
         )
-    prompt_parts.append(f"Comment by @{sit.actor}:\n{sit.comment_body}")
+    conversation = await asyncio.to_thread(_mention_context, sit)
+    if conversation:
+        prompt_parts.append(conversation)
+    prompt_parts.append(f"Comment by @{sit.actor} (answer this):\n{sit.comment_body}")
     prompt = "\n\n".join(prompt_parts)
 
     log.info("SDK engine: mention workflow start (%s #%s, max_turns=%d)",
-             sit.target_type, sit.target_iid, MAX_TURNS)
+             sit.target_type, sit.target_iid, MENTION_MAX_TURNS)
 
     progress.start()
     try:
@@ -520,8 +617,8 @@ async def run_implement(sit: Situation, wf_id: str = "",
             branch_name=branch_name,
             requester=requester,
         ),
-        model="claude-sonnet-4-6",
-        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
+        model=_sdk_model(),
+        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
         allowed_tools=allowed,
         permission_mode="dontAsk",
         max_turns=IMPLEMENT_MAX_TURNS,
@@ -626,7 +723,15 @@ Rules:
   If a step fails, investigate (job logs!) and fix it — iterate until green
   or genuinely blocked.
 - Use post_comment on the issue to report progress as you complete major
-  steps (short, one or two lines each).
+  steps (short, one or two lines each). Your comments are threaded into this
+  session's discussion automatically — keep the issue history clean.
+- If you create new issues/tasks that GitBot itself should work on LATER as
+  separate tasks: assign them to {bot_username} AND add the label
+  `gitbot::queued`, then do NOT work on them in this session — the harness
+  picks them up on its own. Never both queue an issue and do its work
+  yourself; that creates duplicate work. (Issues you create are otherwise
+  invisible to the harness even if self-assigned — without the label, nothing
+  will ever pick them up.)
 - Your final text response is posted to the issue automatically. End it with
   a markdown checklist of every requested item marked ✅ done / ❌ failed
   (with reason). Be honest — the harness audits your claims.
@@ -720,9 +825,10 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             project_name=sit.project_name,
             project_id=sit.project_id,
             requester=requester,
+            bot_username=settings.bot_username,
         ),
-        model="claude-sonnet-4-6",
-        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
+        model=_sdk_model(),
+        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
         allowed_tools=allowed,
         permission_mode="dontAsk",
         max_turns=ORCHESTRATE_MAX_TURNS,
@@ -789,20 +895,25 @@ the bot should treat the comment:
 - "answer": a question or side request that just needs a reply — information,
   a report, an explanation, something not requiring changes to repositories,
   projects or the issue's actual task.
-- "task": a request to DO work — implement/fix/configure something, continue
-  or modify the work this issue describes, or any ask requiring commits,
-  pipelines or project changes.
+- "steer": feedback or direction on work the bot already did or is doing for
+  THIS issue's task — corrections ("that's wrong, fix it"), adjustments
+  ("use X instead of Y"), additions ("also cover Z"), or "continue/retry".
+  The bot should pick the task back up, adopting its prior work.
+- "task": a NEW request to do work — implement/fix/configure something the
+  issue describes but the bot hasn't started, or a fresh ask requiring
+  commits, pipelines or project changes.
 
 Issue title: {title}
 Comment by @{actor}:
 {comment}
 
-Respond with exactly one word: answer or task."""
+Respond with exactly one word: answer, steer or task."""
 
 
 async def classify_comment(sit: Situation) -> str:
-    """Cheap triage for comment callouts: 'answer' (just reply, no labels,
-    no takeover) or 'task' (treat like being assigned the work)."""
+    """Cheap triage for comment callouts: 'answer' (just reply, no labels, no
+    takeover), 'steer' (resume the issue's work incorporating the comment) or
+    'task' (treat like being freshly assigned the work)."""
     from gitbot import llm
     from gitbot.models import Task
 
@@ -816,7 +927,10 @@ async def classify_comment(sit: Situation) -> str:
                 comment=(sit.comment_body or "")[:2000],
             ),
         )
-        if "task" in raw.strip().lower():
+        word = raw.strip().lower()
+        if "steer" in word:
+            return "steer"
+        if "task" in word:
             return "task"
     except Exception as e:
         log.warning("Comment classification failed (%s) — defaulting to answer", e)
