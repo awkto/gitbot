@@ -138,3 +138,17 @@ def test_prompts_format_cleanly():
         asking_rules=_asking_rules("@u"))
     assert "SCORE" in impl and "SCORE" in orch
     assert "gitbot::queued" in orch
+
+
+def test_needs_input_detected_mid_text():
+    from gitbot.engine_sdk import _is_needs_input
+    text = "Report first.\n\n## Summary\n- item\n\nNEEDS_INPUT\nSCORE: 9\nWaiting for group."
+    assert _is_needs_input(text)
+    score, body = _parse_needs_input(text)
+    assert score == 9
+    assert "Report first." in body and "NEEDS_INPUT" not in body
+
+
+def test_needs_input_not_detected_in_prose():
+    from gitbot.engine_sdk import _is_needs_input
+    assert not _is_needs_input("All done, nothing needed from the user.")

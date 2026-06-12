@@ -170,7 +170,12 @@ ASKING_RULES = """\
      NEEDS_INPUT
      SCORE: <your score>
      <one-line summary of what you are waiting for>
-     Their reply will re-trigger you with full context."""
+     Their reply will re-trigger you with full context.
+  5. A destination that does not exist or cannot be identified is a QUESTION
+     (score 9-10), never a problem to solve yourself: do NOT create groups or
+     namespaces the user didn't explicitly ask for. And do not end BLOCKED
+     when an answer from {requester} would unblock you — BLOCKED is only for
+     tasks that no answer could make possible."""
 
 
 def _asking_rules(requester: str) -> str:
@@ -182,11 +187,21 @@ def _asking_rules(requester: str) -> str:
 
 
 _SCORE_RE = re.compile(r"^\s*SCORE:\s*(\d{1,2})\s*$", re.M)
+# Models are told to END with the sentinel but sometimes put a summary after
+# it — accept NEEDS_INPUT at the start of any line, not just position 0.
+_NEEDS_INPUT_RE = re.compile(r"^[ \t]*NEEDS_INPUT\b[ \t]*:?", re.M)
+
+
+def _is_needs_input(final_text: str) -> bool:
+    return bool(_NEEDS_INPUT_RE.search(final_text))
 
 
 def _parse_needs_input(final_text: str) -> tuple[int | None, str]:
     """Strip the NEEDS_INPUT sentinel and SCORE line. Returns (score, body)."""
-    body = final_text.strip()[len("NEEDS_INPUT"):].strip()
+    body = final_text.strip()
+    m = _NEEDS_INPUT_RE.search(body)
+    if m:
+        body = (body[:m.start()] + body[m.end():]).strip()
     m = _SCORE_RE.search(body)
     score = None
     if m:
@@ -741,7 +756,7 @@ async def run_implement(sit: Situation, wf_id: str = "",
     if final_text.strip().startswith("BLOCKED"):
         return (f":no_entry: **GitBot could not implement this issue.**\n\n"
                 f"{final_text.strip()[7:].strip()}"), False
-    if final_text.strip().startswith("NEEDS_INPUT"):
+    if _is_needs_input(final_text):
         return _needs_input_result(sit, final_text)
 
     # Structural finish gate — never report success the API can't confirm
@@ -944,7 +959,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
         return (f":double_vertical_bar: **Task parked — waiting on something slow.**\n\n"
                 f"{final_text.strip()[7:].strip()}\n\n"
                 f"*GitBot will check back periodically and resume.*"), "waiting"
-    if final_text.strip().startswith("NEEDS_INPUT"):
+    if _is_needs_input(final_text):
         return _needs_input_result(sit, final_text)
     return final_text, True
 
