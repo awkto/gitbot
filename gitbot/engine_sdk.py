@@ -129,6 +129,7 @@ _LIGHT_ALLOWED_COMMANDS = {
     "echo", "pwd", "cd", "mkdir", "touch", "cp", "mv", "rm", "sed", "awk",
     "python", "python3", "pytest", "ruff", "make", "true", "false",
     "which", "env", "sort", "uniq", "tr", "cut", "xargs", "test", "[",
+    "sleep", "date",
 }
 
 # Even for allowed interpreters, these substrings mean "installing things" —
@@ -445,3 +446,157 @@ async def run_implement(sit: Situation) -> tuple[str, bool]:
             f"[{mr_info['title']}]({mr_info['url']}) "
             f"({mr_info['commits']} commit{'s' if mr_info['commits'] != 1 else ''})\n\n"
             f"{final_text}"), True
+
+
+# ---------------------------------------------------------------------------
+# Orchestrate workflow (multi-project / admin / CI tasks) — no clone, no MR gate
+# ---------------------------------------------------------------------------
+
+ORCHESTRATE_MAX_TURNS = 120
+
+ORCHESTRATE_SYSTEM = """\
+You are GitBot, an AI DevOps engineer inside a GitLab instance
+({gitlab_url}). You have been assigned issue #{target_iid}
+("{target_title}") in project "{project_name}" (ID: {project_id}).
+
+This is an orchestration task: it may span multiple projects, groups, CI/CD
+configuration, and GitLab settings. Work through it step by step.
+
+Capabilities:
+- Your GitLab tools cover most operations (projects, issues, MRs, files,
+  commits, pipelines, labels, milestones, members...).
+- For anything the tools don't cover, use the GitLab REST API: write a short
+  Python script (stdlib urllib/json) and run it with Bash. The API base is
+  {gitlab_url}/api/v4 and a valid token is in the environment variable
+  GITBOT_GITLAB_TOKEN (header: PRIVATE-TOKEN). Do not print the token.
+- You may run `sleep` and poll pipelines/jobs with your tools while waiting
+  for CI. Pipelines can take a few minutes — be patient and keep polling.
+
+Rules:
+- This container is NOT a devbox: no package installs, no docker locally, no
+  services. Anything that needs a real build environment (builds, scans,
+  container image builds, docker-in-docker) must run in GitLab CI/CD
+  pipelines that you create in the projects themselves.
+- VERIFY each step with the API or pipeline results before calling it done.
+  If a step fails, investigate (job logs!) and fix it — iterate until green
+  or genuinely blocked.
+- Use post_comment on the issue to report progress as you complete major
+  steps (short, one or two lines each).
+- Your final text response is posted to the issue automatically. End it with
+  a markdown checklist of every requested item marked ✅ done / ❌ failed
+  (with reason). Be honest — the harness audits your claims.
+- If the whole task is impossible, start your final response with BLOCKED.
+"""
+
+
+async def run_orchestrate(sit: Situation) -> tuple[str, bool]:
+    """Run a multi-project orchestration task as a single SDK loop.
+
+    There is no structural gate (the task shape is arbitrary) — success is
+    the loop completing with a non-BLOCKED report. The prompt demands
+    per-item verification and an honest final checklist.
+    """
+    import tempfile
+
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage, query
+
+    if settings.anthropic_api_key:
+        os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+
+    workdir = tempfile.mkdtemp(prefix=f"gitbot-orch-{sit.project_id}-{sit.target_iid}-")
+
+    allowed = ["Read", "Write", "Edit", "Glob", "Grep",
+               "mcp__gitlab__*", "WebSearch", "WebFetch"]
+    hooks = None
+    if settings.local_exec != "none":
+        allowed.insert(5, "Bash")
+        if settings.local_exec != "full":
+            hooks = {"PreToolUse": [HookMatcher(matcher="Bash",
+                                                hooks=[_bash_policy_hook()])]}
+
+    options = ClaudeAgentOptions(
+        system_prompt=ORCHESTRATE_SYSTEM.format(
+            gitlab_url=settings.gitlab_url.rstrip("/"),
+            target_iid=sit.target_iid,
+            target_title=sit.target_title,
+            project_name=sit.project_name,
+            project_id=sit.project_id,
+        ),
+        model="claude-sonnet-4-6",
+        mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id)},
+        allowed_tools=allowed,
+        permission_mode="dontAsk",
+        max_turns=ORCHESTRATE_MAX_TURNS,
+        setting_sources=[],
+        cwd=workdir,
+        hooks=hooks,
+    )
+
+    prompt = (
+        f"Issue #{sit.target_iid}: {sit.target_title}\n\n"
+        f"{sit.target_description or '(no description)'}"
+    )
+
+    log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d)",
+             sit.target_iid, ORCHESTRATE_MAX_TURNS)
+
+    final_text = ""
+    try:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, ResultMessage):
+                final_text = message.result or ""
+                log.info("SDK engine: orchestrate loop done (subtype=%s, cost=%s)",
+                         getattr(message, "subtype", "?"),
+                         getattr(message, "total_cost_usd", None))
+    finally:
+        import shutil
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    if not final_text:
+        return ":warning: **GitBot produced no report** (loop ended without a result).", False
+    if final_text.strip().startswith("BLOCKED"):
+        return (f":no_entry: **GitBot could not complete this task.**\n\n"
+                f"{final_text.strip()[7:].strip()}"), False
+    return final_text, True
+
+
+# ---------------------------------------------------------------------------
+# Assigned-issue triage: single-repo code change vs orchestration
+# ---------------------------------------------------------------------------
+
+CLASSIFY_PROMPT = """\
+Classify this GitLab issue assignment for a bot that has two workflows:
+
+- "implement": a code change inside THIS repository — write/modify code or
+  docs here, open a merge request.
+- "orchestrate": anything else — creating/configuring projects or groups,
+  CI/CD setup across projects, GitLab settings, security scanning, registry,
+  Pages, multi-step admin tasks, or work spanning multiple repositories.
+
+Issue title: {title}
+Issue description:
+{description}
+
+Respond with exactly one word: implement or orchestrate."""
+
+
+async def classify_assigned_issue(sit: Situation) -> str:
+    """Cheap triage: 'implement' or 'orchestrate'."""
+    from gitbot import llm
+    from gitbot.models import Task
+
+    try:
+        raw = await llm.complete(
+            Task.CLASSIFY,
+            system="You are a precise classifier. Answer with a single word.",
+            prompt=CLASSIFY_PROMPT.format(
+                title=sit.target_title,
+                description=(sit.target_description or "")[:3000],
+            ),
+        )
+        answer = raw.strip().lower()
+        if "orchestrate" in answer:
+            return "orchestrate"
+    except Exception as e:
+        log.warning("Issue classification failed (%s) — defaulting to implement", e)
+    return "implement"

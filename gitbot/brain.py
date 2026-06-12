@@ -188,10 +188,14 @@ async def decide_and_act(sit: Situation) -> None:
 
             elif sit.target_type == "Issue" and sit.trigger == "assigned":
                 from gitbot import engine_sdk
+                kind = await engine_sdk.classify_assigned_issue(sit)
                 tracker.add_phase(wf_id, "agent")
-                tracker.log("info", "Running SDK agent loop (implement)...", wf_id)
+                tracker.log("info", f"Running SDK agent loop ({kind})...", wf_id)
                 _set_working_label(sit)
-                sdk_result, sdk_ok = await engine_sdk.run_implement(sit)
+                if kind == "orchestrate":
+                    sdk_result, sdk_ok = await engine_sdk.run_orchestrate(sit)
+                else:
+                    sdk_result, sdk_ok = await engine_sdk.run_implement(sit)
 
             if sdk_result is not None:
                 _update_placeholder(sit, placeholder_id, sdk_result)
