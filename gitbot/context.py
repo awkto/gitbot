@@ -84,6 +84,10 @@ class Situation:
     # question it asked when ending with NEEDS_INPUT.
     question_score: int | None = None
 
+    # Task complexity (1-10, per engine_sdk.COMPLEXITY_SCALE) from the triage
+    # classifier — drives auto model selection.
+    task_complexity: int | None = None
+
     # Pending work from state DB — always available (cheap local lookup)
     pending_question: dict | None = None
 

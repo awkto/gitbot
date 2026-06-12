@@ -152,3 +152,42 @@ def test_needs_input_detected_mid_text():
 def test_needs_input_not_detected_in_prose():
     from gitbot.engine_sdk import _is_needs_input
     assert not _is_needs_input("All done, nothing needed from the user.")
+
+
+# --- model selection (complexity auto + per-workflow override) -------------
+
+from gitbot.config import settings as _settings
+from gitbot.engine_sdk import _parse_classification, _workflow_model
+
+
+def test_parse_classification_word_and_score():
+    assert _parse_classification("orchestrate 7", {"implement", "orchestrate"}, "implement") == ("orchestrate", 7)
+    assert _parse_classification("Answer 2", {"answer", "steer", "task"}, "answer") == ("answer", 2)
+
+
+def test_parse_classification_tolerates_prose():
+    word, c = _parse_classification(
+        "I'd say this is a task. Complexity: 9", {"answer", "steer", "task"}, "answer")
+    assert word == "task" and c == 9
+
+
+def test_parse_classification_defaults():
+    assert _parse_classification("no idea", {"implement", "orchestrate"}, "implement") == ("implement", None)
+
+
+def test_auto_model_mapping():
+    assert _workflow_model("mention", 2) == "haiku"
+    assert _workflow_model("mention", 5) == "sonnet"
+    assert _workflow_model("implement", 5) == "sonnet"
+    assert _workflow_model("orchestrate", 9) == "opus"
+    assert _workflow_model("orchestrate", None) == "sonnet"
+    assert _workflow_model("review", 1) == "opus"
+
+
+def test_workflow_model_override_and_reset():
+    _settings.model_orchestrate = "claude-opus-4-7"
+    try:
+        assert _workflow_model("orchestrate", 2) == "claude-opus-4-7"
+    finally:
+        _settings.model_orchestrate = "auto"
+    assert _workflow_model("orchestrate", 2) == "sonnet"

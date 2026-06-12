@@ -161,6 +161,12 @@ async def admin_stats():
         "available_providers": settings.available_providers,
         "setup_needed": settings.setup_needed,
         "question_threshold": settings.question_threshold,
+        "workflow_models": {
+            "mention": settings.model_mention,
+            "implement": settings.model_implement,
+            "orchestrate": settings.model_orchestrate,
+            "review": settings.model_review,
+        },
     }
     return stats
 
@@ -240,6 +246,32 @@ async def admin_set_threshold(request: Request):
     settings.question_threshold = val
     log.info("Question threshold set to %d via admin panel", val)
     return {"status": "ok", "question_threshold": val}
+
+
+_MODEL_VALUE_RE = r"^(auto|haiku|sonnet|opus|claude-[a-z0-9.-]+)$"
+
+
+@app.post("/admin/api/models")
+async def admin_set_workflow_model(request: Request):
+    """Per-workflow model override. "auto" = harness decides from the triage
+    complexity score; "haiku"/"sonnet"/"opus" = current model of that tier
+    (SDK alias, never goes stale); or a pinned id like "claude-opus-4-8".
+    Takes effect for new sessions."""
+    import re as _re
+
+    _check_admin()
+    data = await request.json()
+    workflow = str(data.get("workflow", ""))
+    model = str(data.get("model", "")).strip()
+    if workflow not in ("mention", "implement", "orchestrate", "review"):
+        raise HTTPException(status_code=400, detail="unknown workflow")
+    if not _re.match(_MODEL_VALUE_RE, model):
+        raise HTTPException(
+            status_code=400,
+            detail="model must be auto, haiku, sonnet, opus, or a claude-* id")
+    setattr(settings, f"model_{workflow}", model)
+    log.info("Workflow model set via admin panel: %s -> %s", workflow, model)
+    return {"status": "ok", "workflow": workflow, "model": model}
 
 
 @app.post("/admin/api/test-gitlab")

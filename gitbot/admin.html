@@ -199,7 +199,19 @@ async function fetchStats() {
     if (d.config.setup_needed) { banner.classList.remove('hidden'); form.classList.remove('hidden'); }
     else { banner.classList.add('hidden'); }
 
-    if (document.activeElement && document.activeElement.id === 'qThresh') return;
+    const active = document.activeElement;
+    if (active && active.closest && active.closest('#configRow')) return;
+    const wfModels = d.config.workflow_models || {};
+    const modelSelect = (wf) => {
+      const v = wfModels[wf] || 'auto';
+      const std = ['auto','haiku','sonnet','opus'];
+      const opts = std.map(o =>
+        `<option value="${o}" ${o===v?'selected':''}>${o==='auto'?'auto (GitBot decides)':o}</option>`).join('')
+        + (std.includes(v) ? '' : `<option value="${v}" selected>${v}</option>`)
+        + `<option value="__custom__">pin a model id…</option>`;
+      return `<label style="display:inline-flex;align-items:center;gap:0.25rem;margin-right:0.5rem">${wf}
+        <select onchange="setWorkflowModel('${wf}', this)" style="background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:0.05rem">${opts}</select></label>`;
+    };
     document.getElementById('configRow').innerHTML = `
       <div class="config-item"><div class="label">GitLab</div>${d.config.gitlab_url} <span class="badge ${d.config.gitlab_connected?'ok':'error'}">${d.config.gitlab_connected?'connected':'no token'}</span></div>
       <div class="config-item"><div class="label">Bot</div>@${d.config.bot_username}</div>
@@ -210,6 +222,11 @@ async function fetchStats() {
                style="width:2.6rem;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:0.1rem 0.2rem">/10
         <button onclick="saveThreshold()" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:0.1rem 0.45rem;cursor:pointer;font-size:0.75rem">set</button>
         <span id="qThreshMsg" style="font-size:0.7rem;color:#3fb950"></span>
+      </div>
+      <div class="config-item" title="Model per workflow. auto = GitBot picks from the task's complexity score (haiku/sonnet/opus aliases always resolve to the current model of that tier). Pin a specific id like claude-opus-4-8 if you need to.">
+        <div class="label">Models</div>
+        ${modelSelect('mention')}${modelSelect('implement')}${modelSelect('orchestrate')}${modelSelect('review')}
+        <span id="wfModelMsg" style="font-size:0.7rem;color:#3fb950"></span>
       </div>`;
 
     document.getElementById('statsGrid').innerHTML = `
@@ -391,6 +408,23 @@ async function saveConfig() {
     const d = await r.json();
     el.innerHTML = d.status === 'ok' ? `<span class="badge ok">${d.message}</span>` : `<span class="badge error">${d.error}</span>`;
   } catch(e) { el.innerHTML = `<span class="badge error">${e}</span>`; }
+}
+
+async function setWorkflowModel(wf, sel) {
+  let v = sel.value;
+  if (v === '__custom__') {
+    v = (prompt(`Model id for ${wf} (e.g. claude-opus-4-8), or "auto":`) || '').trim();
+    if (!v) { sel.value = 'auto'; return; }
+  }
+  const msg = document.getElementById('wfModelMsg');
+  try {
+    const r = await fetch(`${API}/models`, {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({workflow: wf, model: v})});
+    msg.textContent = r.ok ? `✓ ${wf}` : '✗ invalid';
+  } catch(e) { msg.textContent = '✗'; }
+  sel.blur();
+  setTimeout(() => { msg.textContent = ''; }, 2500);
 }
 
 async function saveThreshold() {

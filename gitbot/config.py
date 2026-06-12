@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # when the score meets this threshold. Tunable live from the admin panel.
     question_threshold: int = 7
 
+    # Per-workflow model for the SDK engine. "auto" = the harness decides
+    # from the triage classifier's complexity score. Otherwise an alias
+    # ("haiku"/"sonnet"/"opus" — the SDK resolves these to the CURRENT model
+    # of that tier, so we never chase Anthropic releases) or a pinned model
+    # id (e.g. "claude-opus-4-8"). Live-tunable from the admin panel.
+    model_mention: str = "auto"
+    model_implement: str = "auto"
+    model_orchestrate: str = "auto"
+    model_review: str = "auto"  # consumed by the SDK review workflow (#22)
+
     # Provider API keys — set whichever ones you have
     anthropic_api_key: str = ""
     gemini_api_key: str = ""

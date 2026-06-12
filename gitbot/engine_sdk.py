@@ -23,17 +23,60 @@ MAX_TURNS = 40
 MENTION_MAX_TURNS = 12  # answers are cheap: context is pre-fetched, keep it light
 
 
-def _sdk_model(tier=None) -> str:
-    """Model selection is the harness's job, not the SDK's: resolve the
-    configured family/tier (gitbot/models.py + GITBOT_TIER_* overrides) and
-    strip the litellm 'anthropic/' prefix the SDK doesn't use."""
-    from gitbot.models import FAMILY_DEFAULTS, Tier
+# Complexity rubric for the triage classifier — in app code so every model
+# instance rates tasks on the same scale (like QUESTION_SCALE).
+COMPLEXITY_SCALE = """\
+Also rate the task's complexity 1-10:
+- 1-3 TRIVIAL: single-step or factual — answer a question, rename something,
+  post a comment, one small edit.
+- 4-7 STANDARD: one feature/fix/config touching a few files or steps in one
+  project; routine CI or project setup.
+- 8-10 COMPLEX: multi-project orchestration, architecture or
+  security-sensitive changes, deep debugging, long pipelines with many
+  dependent stages, anything where a wrong step is expensive."""
 
-    tier = tier or Tier.MID
-    family = settings.get_llm_family()
-    overrides = settings.tier_overrides()
-    model = (overrides or {}).get(tier) or FAMILY_DEFAULTS[family][tier]
-    return model.split("/", 1)[-1]
+_TIER_ALIAS = {"cheap": "haiku", "mid": "sonnet", "strong": "opus"}
+
+
+def _workflow_model(workflow: str, complexity: int | None) -> str:
+    """Model selection is the harness's job, not the SDK's.
+
+    Admin override per workflow wins (alias or pinned id); "auto" maps the
+    triage complexity score to a tier ALIAS — the SDK resolves haiku/sonnet/
+    opus to the current model of that tier, so nothing here goes stale when
+    Anthropic ships or sunsets models.
+    """
+    override = getattr(settings, f"model_{workflow}", "auto") or "auto"
+    if override != "auto":
+        return override
+    c = complexity if complexity is not None else 5
+    if workflow == "mention":
+        tier = "cheap" if c <= 3 else "mid"
+    elif workflow == "review":
+        tier = "strong"
+    else:  # implement / orchestrate — never below mid: it writes things
+        tier = "strong" if c >= 8 else "mid"
+    return _TIER_ALIAS[tier]
+
+
+_CLASSIFY_RE = re.compile(r"\b([a-z_]+)\b(?:\s+(\d{1,2}))?")
+
+
+def _parse_classification(raw: str, valid: set[str], default: str) -> tuple[str, int | None]:
+    """Parse '<word> <complexity>' from a classifier reply, tolerantly."""
+    complexity = None
+    word = default
+    for m in _CLASSIFY_RE.finditer(raw.strip().lower()):
+        if m.group(1) in valid:
+            word = m.group(1)
+            if m.group(2):
+                complexity = max(1, min(10, int(m.group(2))))
+            break
+    if complexity is None:
+        m = re.search(r"\b(\d{1,2})\b", raw)
+        if m:
+            complexity = max(1, min(10, int(m.group(1))))
+    return word, complexity
 
 
 def _setup_subprocess_env() -> None:
@@ -394,7 +437,7 @@ async def run_mention(sit: Situation, wf_id: str = "",
             project_id=sit.project_id,
             max_turns=MENTION_MAX_TURNS,
         ),
-        model=_sdk_model(),
+        model=_workflow_model("mention", sit.task_complexity),
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
         allowed_tools=["mcp__gitlab__*", "WebSearch", "WebFetch"],
         permission_mode="dontAsk",  # deny anything not explicitly allowed
@@ -414,8 +457,9 @@ async def run_mention(sit: Situation, wf_id: str = "",
     prompt_parts.append(f"Comment by @{sit.actor} (answer this):\n{sit.comment_body}")
     prompt = "\n\n".join(prompt_parts)
 
-    log.info("SDK engine: mention workflow start (%s #%s, max_turns=%d)",
-             sit.target_type, sit.target_iid, MENTION_MAX_TURNS)
+    log.info("SDK engine: mention workflow start (%s #%s, max_turns=%d, model=%s, complexity=%s)",
+             sit.target_type, sit.target_iid, MENTION_MAX_TURNS,
+             options.model, sit.task_complexity)
 
     progress.start()
     try:
@@ -706,7 +750,7 @@ async def run_implement(sit: Situation, wf_id: str = "",
             requester=requester,
             asking_rules=_asking_rules(requester),
         ),
-        model=_sdk_model(),
+        model=_workflow_model("implement", sit.task_complexity),
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
         allowed_tools=allowed,
         permission_mode="dontAsk",
@@ -731,8 +775,9 @@ async def run_implement(sit: Situation, wf_id: str = "",
             f"open; continue from the existing state instead of starting over."
         )
 
-    log.info("SDK engine: implement workflow start (Issue #%s, branch=%s, resumed=%s)",
-             sit.target_iid, branch_name, sit.is_replay)
+    log.info("SDK engine: implement workflow start (Issue #%s, branch=%s, resumed=%s, model=%s, complexity=%s)",
+             sit.target_iid, branch_name, sit.is_replay,
+             options.model, sit.task_complexity)
 
     final_text = ""
     progress.start()
@@ -909,7 +954,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             bot_username=settings.bot_username,
             asking_rules=_asking_rules(requester),
         ),
-        model=_sdk_model(),
+        model=_workflow_model("orchestrate", sit.task_complexity),
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
         allowed_tools=allowed,
         permission_mode="dontAsk",
@@ -938,8 +983,9 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             "--- Original task below ---\n\n" + prompt
         )
 
-    log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d, resumed=%s)",
-             sit.target_iid, ORCHESTRATE_MAX_TURNS, sit.is_replay)
+    log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d, resumed=%s, model=%s, complexity=%s)",
+             sit.target_iid, ORCHESTRATE_MAX_TURNS, sit.is_replay,
+             options.model, sit.task_complexity)
 
     progress.start()
     try:
@@ -987,7 +1033,10 @@ Issue title: {title}
 Comment by @{actor}:
 {comment}
 
-Respond with exactly one word: answer, steer or task."""
+{complexity_scale}
+
+Respond with exactly: <answer|steer|task> <complexity>
+Example: answer 2"""
 
 
 async def classify_comment(sit: Situation) -> str:
@@ -1000,18 +1049,18 @@ async def classify_comment(sit: Situation) -> str:
     try:
         raw = await llm.complete(
             Task.CLASSIFY,
-            system="You are a precise classifier. Answer with a single word.",
+            system="You are a precise classifier. Answer in the exact format requested.",
             prompt=CLASSIFY_COMMENT_PROMPT.format(
                 title=sit.target_title,
                 actor=sit.actor,
                 comment=(sit.comment_body or "")[:2000],
+                complexity_scale=COMPLEXITY_SCALE,
             ),
         )
-        word = raw.strip().lower()
-        if "steer" in word:
-            return "steer"
-        if "task" in word:
-            return "task"
+        word, complexity = _parse_classification(
+            raw, {"answer", "steer", "task"}, "answer")
+        sit.task_complexity = complexity
+        return word
     except Exception as e:
         log.warning("Comment classification failed (%s) — defaulting to answer", e)
     return "answer"
@@ -1030,26 +1079,32 @@ Issue title: {title}
 Issue description:
 {description}
 
-Respond with exactly one word: implement or orchestrate."""
+{complexity_scale}
+
+Respond with exactly: <implement|orchestrate> <complexity>
+Example: orchestrate 7"""
 
 
 async def classify_assigned_issue(sit: Situation) -> str:
-    """Cheap triage: 'implement' or 'orchestrate'."""
+    """Cheap triage: 'implement' or 'orchestrate' (+ complexity score,
+    stashed on sit.task_complexity for auto model selection)."""
     from gitbot import llm
     from gitbot.models import Task
 
     try:
         raw = await llm.complete(
             Task.CLASSIFY,
-            system="You are a precise classifier. Answer with a single word.",
+            system="You are a precise classifier. Answer in the exact format requested.",
             prompt=CLASSIFY_PROMPT.format(
                 title=sit.target_title,
                 description=(sit.target_description or "")[:3000],
+                complexity_scale=COMPLEXITY_SCALE,
             ),
         )
-        answer = raw.strip().lower()
-        if "orchestrate" in answer:
-            return "orchestrate"
+        word, complexity = _parse_classification(
+            raw, {"implement", "orchestrate"}, "implement")
+        sit.task_complexity = complexity
+        return word
     except Exception as e:
         log.warning("Issue classification failed (%s) — defaulting to implement", e)
     return "implement"
