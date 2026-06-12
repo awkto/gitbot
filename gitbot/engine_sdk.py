@@ -229,6 +229,23 @@ def _asking_rules(requester: str) -> str:
     )
 
 
+# Self-handoff (github/gitbot#28): in every workflow that can create issues,
+# not just orchestrate — an implement session that queues a follow-up without
+# the label leaves it invisible forever.
+QUEUE_RULES = """\
+- If you create new issues/tasks that GitBot itself should work on LATER as
+  separate tasks: assign them to {bot_username} AND add the label
+  `gitbot::queued`, then do NOT work on them in this session — the harness
+  picks them up on its own. Never both queue an issue and do its work
+  yourself; that creates duplicate work. (Issues you create are otherwise
+  invisible to the harness even if self-assigned — without the label, nothing
+  will ever pick them up.)"""
+
+
+def _queue_rules() -> str:
+    return QUEUE_RULES.format(bot_username=settings.bot_username)
+
+
 _SCORE_RE = re.compile(r"^\s*SCORE:\s*(\d{1,2})\s*$", re.M)
 # Models are told to END with the sentinel but sometimes put a summary after
 # it — accept NEEDS_INPUT at the start of any line, not just position 0.
@@ -590,8 +607,14 @@ Rules:
 - Do NOT close the issue, do NOT merge the MR, do NOT commit to the default branch.
 - Do NOT use post_comment for your final summary — your final text response is
   posted to the issue automatically.
+- If completing the issue turns out to require NO changes to repository files
+  (it is only about branches/issues/labels, or the work already exists), do
+  NOT invent file changes just to open an MR. Do the non-file actions with
+  your GitLab tools, then start your final response with the word NO_CHANGES
+  followed by your report — the harness accepts that as success.
 - If the issue is impossible to implement, make no commits and explain why in
   your final response, starting it with the word BLOCKED.
+{queue_rules}
 {asking_rules}
 """
 
@@ -748,6 +771,7 @@ async def run_implement(sit: Situation, wf_id: str = "",
             project_id=sit.project_id,
             branch_name=branch_name,
             requester=requester,
+            queue_rules=_queue_rules(),
             asking_rules=_asking_rules(requester),
         ),
         model=_workflow_model("implement", sit.task_complexity),
@@ -787,7 +811,8 @@ async def run_implement(sit: Situation, wf_id: str = "",
 
         # local_exec=none: the agent only edited files — branch/commit/push/MR
         # are the harness's job.
-        if mode == "none" and not final_text.strip().startswith("BLOCKED"):
+        if (mode == "none"
+                and not final_text.strip().startswith(("BLOCKED", "NO_CHANGES"))):
             err = await asyncio.to_thread(
                 _finalize_no_shell, repo_path, branch_name, sit, default_branch
             )
@@ -803,6 +828,18 @@ async def run_implement(sit: Situation, wf_id: str = "",
                 f"{final_text.strip()[7:].strip()}"), False
     if _is_needs_input(final_text):
         return _needs_input_result(sit, final_text)
+
+    if final_text.strip().startswith("NO_CHANGES"):
+        # The issue needed no file changes — accept without the MR gate, but
+        # only if the agent really didn't push a branch (otherwise fall
+        # through and report the MR like any other run).
+        body = final_text.strip()[len("NO_CHANGES"):].lstrip(" :\n")
+        mr_info, _ = await asyncio.to_thread(
+            _verify_implement, sit.project_id, sit.target_iid, branch_name)
+        if mr_info is None:
+            return (f":white_check_mark: **Done — no code changes were needed.**\n\n"
+                    f"{body}"), True
+        final_text = body
 
     # Structural finish gate — never report success the API can't confirm
     mr_info, reason = await asyncio.to_thread(
@@ -857,13 +894,7 @@ Rules:
 - Use post_comment on the issue to report progress as you complete major
   steps (short, one or two lines each). Your comments are threaded into this
   session's discussion automatically — keep the issue history clean.
-- If you create new issues/tasks that GitBot itself should work on LATER as
-  separate tasks: assign them to {bot_username} AND add the label
-  `gitbot::queued`, then do NOT work on them in this session — the harness
-  picks them up on its own. Never both queue an issue and do its work
-  yourself; that creates duplicate work. (Issues you create are otherwise
-  invisible to the harness even if self-assigned — without the label, nothing
-  will ever pick them up.)
+{queue_rules}
 - Your final text response is posted to the issue automatically. End it with
   a markdown checklist of every requested item marked ✅ done / ❌ failed
   (with reason). Be honest — the harness audits your claims.
@@ -951,7 +982,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             project_name=sit.project_name,
             project_id=sit.project_id,
             requester=requester,
-            bot_username=settings.bot_username,
+            queue_rules=_queue_rules(),
             asking_rules=_asking_rules(requester),
         ),
         model=_workflow_model("orchestrate", sit.task_complexity),
@@ -1269,11 +1300,13 @@ async def classify_comment(sit: Situation) -> str:
 CLASSIFY_PROMPT = """\
 Classify this GitLab issue assignment for a bot that has two workflows:
 
-- "implement": a code change inside THIS repository — write/modify code or
-  docs here, open a merge request.
+- "implement": a change to FILES inside THIS repository — write/modify code
+  or docs here, open a merge request.
 - "orchestrate": anything else — creating/configuring projects or groups,
   CI/CD setup across projects, GitLab settings, security scanning, registry,
   Pages, multi-step admin tasks, or work spanning multiple repositories.
+  Managing branches, issues, labels, milestones or members WITHOUT changing
+  repository files is orchestrate, not implement.
 
 Issue title: {title}
 Issue description:

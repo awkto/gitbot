@@ -128,16 +128,22 @@ def test_asking_rules_contains_scale_and_threshold():
 
 
 def test_prompts_format_cleanly():
-    from gitbot.engine_sdk import IMPLEMENT_SYSTEM, ORCHESTRATE_SYSTEM
+    from gitbot.engine_sdk import IMPLEMENT_SYSTEM, ORCHESTRATE_SYSTEM, _queue_rules
     impl = IMPLEMENT_SYSTEM.format(
         target_iid=1, target_title="t", project_name="p", project_id=1,
-        branch_name="b", requester="@u", asking_rules=_asking_rules("@u"))
+        branch_name="b", requester="@u", queue_rules=_queue_rules(),
+        asking_rules=_asking_rules("@u"))
     orch = ORCHESTRATE_SYSTEM.format(
         gitlab_url="https://x", target_iid=1, target_title="t",
-        project_name="p", project_id=1, requester="@u", bot_username="gitbot",
-        asking_rules=_asking_rules("@u"))
+        project_name="p", project_id=1, requester="@u",
+        queue_rules=_queue_rules(), asking_rules=_asking_rules("@u"))
     assert "SCORE" in impl and "SCORE" in orch
+    # The queued self-handoff rules must be in BOTH workflows that can create
+    # issues (github/gitbot#28: an implement session queued an unlabeled issue)
     assert "gitbot::queued" in orch
+    assert "gitbot::queued" in impl
+    # No-busywork escape: implement must not invent an MR for label/branch work
+    assert "NO_CHANGES" in impl
 
 
 def test_needs_input_detected_mid_text():

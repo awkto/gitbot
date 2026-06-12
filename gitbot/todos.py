@@ -48,11 +48,23 @@ async def process_pending_todos(min_age_seconds: int = 0) -> None:
 
     log.info("Found %d pending todos", len(todos))
 
+    from gitbot.config import settings
+
     for todo in todos:
         action = _ACTION_MAP.get(todo["action"], todo["action"])
         target_type = todo["target_type"]
         target_iid = todo["target_iid"]
         project_id = todo["project_id"]
+
+        # Todos the bot caused itself (e.g. self-assigning a follow-up issue
+        # mid-session) must never replay: self-created work enters ONLY via
+        # the deliberate gitbot::queued handoff, same as dropped self-webhooks
+        # — otherwise the queued issue runs twice (github/gitbot#28).
+        if todo.get("author") == settings.bot_username:
+            log.info("  -> Self-authored todo on %s #%s, marking done (queued "
+                     "label is the only self-handoff)", target_type, target_iid)
+            _safe_mark_done(todo["id"])
+            continue
 
         if min_age_seconds:
             try:
