@@ -21,6 +21,17 @@ log = logging.getLogger(__name__)
 
 MAX_TURNS = 40
 
+def _setup_subprocess_env() -> None:
+    """Env for the SDK subprocess (inherited by Bash tools): Anthropic auth
+    and glab CLI auth against the configured GitLab instance."""
+    if settings.anthropic_api_key:
+        os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+    if settings.gitlab_token:
+        host = settings.gitlab_url.split("://", 1)[-1].rstrip("/")
+        os.environ.setdefault("GITLAB_HOST", host)
+        os.environ.setdefault("GITLAB_TOKEN", settings.gitlab_token)
+
+
 MENTION_SYSTEM = """\
 You are GitBot, an AI teammate inside a GitLab instance. A user mentioned you
 in a comment (or replied to you) on {target_type} #{target_iid} ("{target_title}")
@@ -185,9 +196,7 @@ async def run_mention(sit: Situation, wf_id: str = "",
     """
     from claude_agent_sdk import ClaudeAgentOptions, query
 
-    # The SDK subprocess authenticates via ANTHROPIC_API_KEY
-    if settings.anthropic_api_key:
-        os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+    _setup_subprocess_env()
 
     progress = Progress(sit, placeholder_id)
 
@@ -241,7 +250,7 @@ _LIGHT_ALLOWED_COMMANDS = {
     "echo", "pwd", "cd", "mkdir", "touch", "cp", "mv", "rm", "sed", "awk",
     "python", "python3", "pytest", "ruff", "make", "true", "false",
     "which", "env", "sort", "uniq", "tr", "cut", "xargs", "test", "[",
-    "sleep", "date",
+    "sleep", "date", "glab",
 }
 
 # Even for allowed interpreters, these substrings mean "installing things" —
@@ -461,8 +470,7 @@ async def run_implement(sit: Situation, wf_id: str = "",
 
     from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
-    if settings.anthropic_api_key:
-        os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+    _setup_subprocess_env()
 
     progress = Progress(sit, placeholder_id)
     branch_name = f"gitbot/issue-{sit.target_iid}"
@@ -597,10 +605,12 @@ configuration, and GitLab settings. Work through it step by step.
 Capabilities:
 - Your GitLab tools cover most operations (projects, issues, MRs, files,
   commits, pipelines, labels, milestones, members...).
-- For anything the tools don't cover, use the GitLab REST API: write a short
-  Python script (stdlib urllib/json) and run it with Bash. The API base is
-  {gitlab_url}/api/v4 and a valid token is in the environment variable
-  GITBOT_GITLAB_TOKEN (header: PRIVATE-TOKEN). Do not print the token.
+- For anything the tools don't cover, use the `glab` CLI (installed and
+  pre-authenticated against this instance) — e.g.
+  `glab api projects/<id>/job_token_scope/allowlist -X POST -f target_project_id=<id>`.
+  Raw REST via a short Python stdlib script is the fallback (base
+  {gitlab_url}/api/v4, token in env var GITBOT_GITLAB_TOKEN as PRIVATE-TOKEN).
+  Never print tokens.
 - To wait for CI, use the `wait_for_pipeline` tool — it blocks until the
   pipeline finishes and returns the final status with a job summary. Do NOT
   poll with sleep loops; one wait_for_pipeline call per pipeline.
@@ -683,8 +693,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
 
     from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage, query
 
-    if settings.anthropic_api_key:
-        os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+    _setup_subprocess_env()
 
     progress = Progress(sit, placeholder_id)
     workdir = tempfile.mkdtemp(prefix=f"gitbot-orch-{sit.project_id}-{sit.target_iid}-")
