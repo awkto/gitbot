@@ -131,6 +131,83 @@ def _post_session_comment(sit: Situation, body: str) -> str:
     return f"Comment posted in the session thread (note_id={note_id})."
 
 
+# ---------------------------------------------------------------------------
+# Clarifying questions — research, score, ask only above threshold
+# ---------------------------------------------------------------------------
+
+# The importance scale lives in app code (not the model) so every model
+# instance ranks questions on the same rubric.
+QUESTION_SCALE = """\
+     - 9-10 BLOCKING: proceeding would be wrong or destructive. Required
+       info is missing AND unguessable even after research — a destination
+       (group/namespace/project) that matches nothing that exists, access or
+       credentials you don't have, contradictory requirements, or an
+       irreversible action (deletion, force-push) with an unclear target.
+     - 7-8 HIGH: a wrong guess is costly to undo or visible to others
+       (wrong namespace, wrong visibility on something shared), and research
+       left two or more equally plausible candidates.
+     - 5-6 MEDIUM: research surfaced a clearly-best candidate with residual
+       doubt; a wrong guess is easy to correct later.
+     - 3-4 LOW: stylistic or minor scope choices (naming details, label
+       colors, README wording) where a sensible default exists.
+     - 1-2 TRIVIAL: anything a reasonable teammate would just decide."""
+
+ASKING_RULES = """\
+- Asking the user ({requester}) a question:
+  1. RESEARCH first — try to answer it yourself (list groups/projects, read
+     related issues and comments, check existing conventions). Research
+     usually lowers a question's importance and often eliminates it: a 10
+     "which group?" becomes a 2 if exactly one plausible group exists.
+  2. SCORE the question that remains, on this scale:
+{scale}
+  3. The current ask threshold is {threshold}/10. If your score is BELOW the
+     threshold: do not ask. Make the best assumption, proceed, and record
+     both the assumption and the unasked question (with its score) in your
+     final report.
+  4. If the score MEETS the threshold: post ONE consolidated comment via
+     post_comment tagging {requester} with ALL your questions and exactly
+     what you need, then end your final response with:
+     NEEDS_INPUT
+     SCORE: <your score>
+     <one-line summary of what you are waiting for>
+     Their reply will re-trigger you with full context."""
+
+
+def _asking_rules(requester: str) -> str:
+    return ASKING_RULES.format(
+        requester=requester,
+        scale=QUESTION_SCALE,
+        threshold=settings.question_threshold,
+    )
+
+
+_SCORE_RE = re.compile(r"^\s*SCORE:\s*(\d{1,2})\s*$", re.M)
+
+
+def _parse_needs_input(final_text: str) -> tuple[int | None, str]:
+    """Strip the NEEDS_INPUT sentinel and SCORE line. Returns (score, body)."""
+    body = final_text.strip()[len("NEEDS_INPUT"):].strip()
+    m = _SCORE_RE.search(body)
+    score = None
+    if m:
+        score = max(1, min(10, int(m.group(1))))
+        body = (body[:m.start()] + body[m.end():]).strip()
+    return score, body
+
+
+def _needs_input_result(sit: Situation, final_text: str) -> tuple[str, str]:
+    score, body = _parse_needs_input(final_text)
+    sit.question_score = score
+    if score is not None and score < settings.question_threshold:
+        log.warning("Agent asked below threshold (score=%s < %s) on %s #%s",
+                    score, settings.question_threshold, sit.target_type,
+                    sit.target_iid)
+    importance = f" *(importance {score}/10)*" if score else ""
+    return (f":raising_hand: **GitBot needs input to continue.**{importance}\n\n"
+            f"{body}\n\n"
+            f"*Reply on this issue to resume the task.*"), "needs_input"
+
+
 def _build_gitlab_mcp_server(project_id: int, sit: Situation | None = None):
     """Expose the existing GitLab tool set as an in-process SDK MCP server.
 
@@ -456,11 +533,7 @@ Rules:
   posted to the issue automatically.
 - If the issue is impossible to implement, make no commits and explain why in
   your final response, starting it with the word BLOCKED.
-- If there is a CLEAR blocker only the user can resolve (contradictory or
-  critically ambiguous requirements), post ONE consolidated comment tagging
-  {requester} with your questions, then end your final response with
-  NEEDS_INPUT. Otherwise prefer a sensible assumption, noted in the MR
-  description — do not ask about minor choices.
+{asking_rules}
 """
 
 
@@ -616,6 +689,7 @@ async def run_implement(sit: Situation, wf_id: str = "",
             project_id=sit.project_id,
             branch_name=branch_name,
             requester=requester,
+            asking_rules=_asking_rules(requester),
         ),
         model=_sdk_model(),
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
@@ -668,9 +742,7 @@ async def run_implement(sit: Situation, wf_id: str = "",
         return (f":no_entry: **GitBot could not implement this issue.**\n\n"
                 f"{final_text.strip()[7:].strip()}"), False
     if final_text.strip().startswith("NEEDS_INPUT"):
-        return (f":raising_hand: **GitBot needs input to continue.**\n\n"
-                f"{final_text.strip()[11:].strip()}\n\n"
-                f"*Reply on this issue to resume the task.*"), "needs_input"
+        return _needs_input_result(sit, final_text)
 
     # Structural finish gate — never report success the API can't confirm
     mr_info, reason = await asyncio.to_thread(
@@ -742,13 +814,7 @@ Rules:
   be done, then start your final response with the word WAITING. The harness
   will re-run you periodically; your resumed self will see your comments and
   continue.
-- Asking the user ({requester}): ONLY for a clear blocker you cannot resolve
-  or reasonably assume your way around (contradictory requirements, missing
-  access/permissions, a decision with real consequences). Prefer making a
-  sensible assumption and noting it in your report. To ask: post ONE
-  consolidated comment tagging {requester} with ALL your questions and what
-  you need, then end your final response with NEEDS_INPUT. Their reply will
-  re-trigger you with full context.
+{asking_rules}
 """
 
 
@@ -826,6 +892,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             project_id=sit.project_id,
             requester=requester,
             bot_username=settings.bot_username,
+            asking_rules=_asking_rules(requester),
         ),
         model=_sdk_model(),
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
@@ -878,9 +945,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
                 f"{final_text.strip()[7:].strip()}\n\n"
                 f"*GitBot will check back periodically and resume.*"), "waiting"
     if final_text.strip().startswith("NEEDS_INPUT"):
-        return (f":raising_hand: **GitBot needs input to continue.**\n\n"
-                f"{final_text.strip()[11:].strip()}\n\n"
-                f"*Reply on this issue to resume the task.*"), "needs_input"
+        return _needs_input_result(sit, final_text)
     return final_text, True
 
 

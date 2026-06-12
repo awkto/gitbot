@@ -95,3 +95,46 @@ def test_untagged_comment_with_assignee_role_passes():
     sit = _sit(actor="bob", discussion_id="d2", comment_body="hello world",
                bot_is_assignee=True)
     assert not _should_skip(sit)
+
+
+# --- NEEDS_INPUT score parsing (question-importance scoring) ---------------
+
+from gitbot.engine_sdk import _parse_needs_input, _asking_rules
+
+
+def test_parse_needs_input_with_score():
+    score, body = _parse_needs_input(
+        "NEEDS_INPUT\nSCORE: 9\nWaiting for the target group name.")
+    assert score == 9
+    assert body == "Waiting for the target group name."
+
+
+def test_parse_needs_input_without_score():
+    score, body = _parse_needs_input("NEEDS_INPUT\nWhich group did you mean?")
+    assert score is None
+    assert body == "Which group did you mean?"
+
+
+def test_parse_needs_input_clamps_score():
+    score, _ = _parse_needs_input("NEEDS_INPUT\nSCORE: 15\nstuff")
+    assert score == 10
+
+
+def test_asking_rules_contains_scale_and_threshold():
+    rules = _asking_rules("@alice")
+    assert "9-10 BLOCKING" in rules
+    assert "@alice" in rules
+    assert "/10" in rules
+
+
+def test_prompts_format_cleanly():
+    from gitbot.engine_sdk import IMPLEMENT_SYSTEM, ORCHESTRATE_SYSTEM
+    impl = IMPLEMENT_SYSTEM.format(
+        target_iid=1, target_title="t", project_name="p", project_id=1,
+        branch_name="b", requester="@u", asking_rules=_asking_rules("@u"))
+    orch = ORCHESTRATE_SYSTEM.format(
+        gitlab_url="https://x", target_iid=1, target_title="t",
+        project_name="p", project_id=1, requester="@u", bot_username="gitbot",
+        asking_rules=_asking_rules("@u"))
+    assert "SCORE" in impl and "SCORE" in orch
+    assert "gitbot::queued" in orch

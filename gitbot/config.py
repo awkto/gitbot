@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # scheduler can also POST /reconcile with the webhook secret.
     reconcile_minutes: int = 10
 
+    # Clarifying questions: after researching, the agent scores a would-be
+    # question 1-10 against the rubric in engine_sdk.QUESTION_SCALE (defined
+    # in app code so every model instance ranks consistently) and only asks
+    # when the score meets this threshold. Tunable live from the admin panel.
+    question_threshold: int = 7
+
     # Provider API keys — set whichever ones you have
     anthropic_api_key: str = ""
     gemini_api_key: str = ""

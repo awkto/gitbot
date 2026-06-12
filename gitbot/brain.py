@@ -261,8 +261,12 @@ async def decide_and_act(sit: Situation) -> None:
                     _set_label(sit, "gitbot::needs-input")
                     state.set_pending_response(
                         work_id, question=sdk_result[:500], asked_user=sit.actor,
-                        discussion_id=sit.session_discussion_id)
-                    tracker.log("info", f"Asked for input: {target_str}", wf_id)
+                        discussion_id=sit.session_discussion_id,
+                        context={"score": sit.question_score}
+                        if sit.question_score else None)
+                    tracker.log("info",
+                                f"Asked for input (importance "
+                                f"{sit.question_score or '?'}/10): {target_str}", wf_id)
                     tracker.finish_workflow(wf_id, "completed")
                     return
                 if owns_labels:

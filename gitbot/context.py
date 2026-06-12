@@ -80,6 +80,10 @@ class Situation:
     # is a reply into it. Set by _post_placeholder.
     session_discussion_id: str = ""
 
+    # Importance (1-10, per engine_sdk.QUESTION_SCALE) the agent gave the
+    # question it asked when ending with NEEDS_INPUT.
+    question_score: int | None = None
+
     # Pending work from state DB — always available (cheap local lookup)
     pending_question: dict | None = None
 

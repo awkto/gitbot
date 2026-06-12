@@ -160,6 +160,7 @@ async def admin_stats():
         "llm_configured": settings.is_configured or settings.get_llm_family() == Family.CLAUDE_CODE,
         "available_providers": settings.available_providers,
         "setup_needed": settings.setup_needed,
+        "question_threshold": settings.question_threshold,
     }
     return stats
 
@@ -220,6 +221,25 @@ async def admin_save_config(request: Request):
     Path(".env").write_text(env_content)
 
     return {"status": "ok", "message": "Config saved. Restart the container to apply changes."}
+
+
+@app.post("/admin/api/threshold")
+async def admin_set_threshold(request: Request):
+    """Live-tune how important a question must be (1-10) before the agent
+    asks the user instead of assuming. Takes effect for new sessions."""
+    _check_admin()
+    data = await request.json()
+    try:
+        val = int(data.get("question_threshold"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400,
+                            detail="question_threshold must be an integer")
+    if not 1 <= val <= 10:
+        raise HTTPException(status_code=400,
+                            detail="question_threshold must be 1-10")
+    settings.question_threshold = val
+    log.info("Question threshold set to %d via admin panel", val)
+    return {"status": "ok", "question_threshold": val}
 
 
 @app.post("/admin/api/test-gitlab")
