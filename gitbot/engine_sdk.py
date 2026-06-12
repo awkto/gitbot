@@ -535,6 +535,8 @@ async def run_implement(sit: Situation, wf_id: str = "",
         f"{sit.target_description or '(no description)'}\n\n"
         f"The repository default branch is `{default_branch}`."
     )
+    if sit.comment_body:
+        prompt += f"\n\nLatest comment from @{sit.actor}:\n{sit.comment_body}"
     if sit.is_replay:
         prompt += (
             f"\n\nIMPORTANT — RESUMED TASK: this work was interrupted and partial "
@@ -779,6 +781,47 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
 # ---------------------------------------------------------------------------
 # Assigned-issue triage: single-repo code change vs orchestration
 # ---------------------------------------------------------------------------
+
+CLASSIFY_COMMENT_PROMPT = """\
+A user commented on a GitLab issue where a bot is participating. Decide how
+the bot should treat the comment:
+
+- "answer": a question or side request that just needs a reply — information,
+  a report, an explanation, something not requiring changes to repositories,
+  projects or the issue's actual task.
+- "task": a request to DO work — implement/fix/configure something, continue
+  or modify the work this issue describes, or any ask requiring commits,
+  pipelines or project changes.
+
+Issue title: {title}
+Comment by @{actor}:
+{comment}
+
+Respond with exactly one word: answer or task."""
+
+
+async def classify_comment(sit: Situation) -> str:
+    """Cheap triage for comment callouts: 'answer' (just reply, no labels,
+    no takeover) or 'task' (treat like being assigned the work)."""
+    from gitbot import llm
+    from gitbot.models import Task
+
+    try:
+        raw = await llm.complete(
+            Task.CLASSIFY,
+            system="You are a precise classifier. Answer with a single word.",
+            prompt=CLASSIFY_COMMENT_PROMPT.format(
+                title=sit.target_title,
+                actor=sit.actor,
+                comment=(sit.comment_body or "")[:2000],
+            ),
+        )
+        if "task" in raw.strip().lower():
+            return "task"
+    except Exception as e:
+        log.warning("Comment classification failed (%s) — defaulting to answer", e)
+    return "answer"
+
 
 CLASSIFY_PROMPT = """\
 Classify this GitLab issue assignment for a bot that has two workflows:

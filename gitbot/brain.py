@@ -199,10 +199,24 @@ async def decide_and_act(sit: Situation) -> None:
 
             elif sit.trigger in ("mentioned", "comment"):
                 from gitbot import engine_sdk
+                # Side question vs work request: a plain answer must not churn
+                # labels or take over the issue; a work request is handled
+                # like an assignment (labels, task workflow, finish states).
+                intent = await engine_sdk.classify_comment(sit)
                 tracker.add_phase(wf_id, "agent")
-                tracker.log("info", "Running SDK agent loop (mention)...", wf_id)
-                _set_working_label(sit)
-                sdk_result = await engine_sdk.run_mention(sit, wf_id, placeholder_id)
+                if intent == "task":
+                    kind = await engine_sdk.classify_assigned_issue(sit)
+                    tracker.log("info", f"Comment is a work request — running {kind}...", wf_id)
+                    _set_working_label(sit)
+                    if kind == "orchestrate":
+                        sdk_result, sdk_ok = await engine_sdk.run_orchestrate(
+                            sit, wf_id, placeholder_id)
+                    else:
+                        sdk_result, sdk_ok = await engine_sdk.run_implement(
+                            sit, wf_id, placeholder_id)
+                else:
+                    tracker.log("info", "Running SDK agent loop (answer)...", wf_id)
+                    sdk_result = await engine_sdk.run_mention(sit, wf_id, placeholder_id)
 
             elif sit.target_type == "Issue" and sit.trigger in ("assigned", "resumed"):
                 from gitbot import engine_sdk
@@ -831,15 +845,21 @@ def _should_skip(sit: Situation) -> bool:
 
 
 def _post_placeholder(sit: Situation) -> int | None:
+    # Comment callouts don't get a thinking label: a side question must not
+    # mark the issue as bot-owned work (labels also drive crash recovery —
+    # an interrupted answer should not resurrect the whole issue as a task).
+    set_label = sit.event_type != "Note Hook"
     try:
         body = ":hourglass_flowing_sand: **GitBot is thinking...**"
         if sit.target_type == "Issue":
             note_id = glc.post_note_on_issue(sit.project_id, sit.target_iid, body)
-            glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::thinking"])
+            if set_label:
+                glc.set_issue_labels(sit.project_id, sit.target_iid, ["gitbot::thinking"])
             return note_id
         elif sit.target_type == "MergeRequest":
             note_id = glc.post_note_on_mr(sit.project_id, sit.target_iid, body)
-            glc.set_mr_labels(sit.project_id, sit.target_iid, ["gitbot::thinking"])
+            if set_label:
+                glc.set_mr_labels(sit.project_id, sit.target_iid, ["gitbot::thinking"])
             return note_id
     except Exception:
         log.warning("Could not post placeholder")
