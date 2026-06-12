@@ -187,7 +187,7 @@ async def decide_and_act(sit: Situation) -> None:
                 _set_working_label(sit)
                 sdk_result = await engine_sdk.run_mention(sit, wf_id, placeholder_id)
 
-            elif sit.target_type == "Issue" and sit.trigger == "assigned":
+            elif sit.target_type == "Issue" and sit.trigger in ("assigned", "resumed"):
                 from gitbot import engine_sdk
                 kind = await engine_sdk.classify_assigned_issue(sit)
                 tracker.add_phase(wf_id, "agent")
