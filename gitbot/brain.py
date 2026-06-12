@@ -245,6 +245,15 @@ async def decide_and_act(sit: Situation) -> None:
 
             if sdk_result is not None:
                 _update_placeholder(sit, placeholder_id, sdk_result)
+                if sit.event_type == "Note Hook" and sit.comment_body:
+                    # Tick off the GitLab TODO this mention created — the
+                    # todo ledger is how interrupted callouts are found, so
+                    # a finished session must positively ack it.
+                    import asyncio
+                    from gitbot import todos as todos_mod
+                    await asyncio.to_thread(
+                        todos_mod.ack_comment_todos, sit.project_id,
+                        sit.target_type, sit.target_iid, sit.comment_body)
                 if sdk_ok == "waiting":
                     # Parked: swap working labels for gitbot::waiting so the
                     # reconciliation sweep picks it back up later.

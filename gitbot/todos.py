@@ -20,8 +20,23 @@ _ACTION_MAP = {
 }
 
 
-async def process_pending_todos() -> None:
-    """Check pending todos and process any that need action."""
+# Don't replay todos younger than this: the webhook for them is probably in
+# flight (or its workflow still running). Todos are the catch-up net for
+# missed/interrupted events, not the primary trigger path.
+_TODO_MIN_AGE_SECONDS = 600
+
+
+async def process_pending_todos(min_age_seconds: int = 0) -> None:
+    """GitLab TODOs as the bot's completion ledger (like a human's TODO page).
+
+    Mentions/assignments create pending todos for the bot automatically;
+    a completed session marks its todo done (ack_comment_todos / the
+    already-handled checks here). Whatever is still pending after a crash or
+    missed webhook is, by definition, unfinished — and gets replayed.
+    """
+    import time
+    from datetime import datetime, timezone
+
     try:
         todos = glc.get_pending_todos()
     except Exception:
@@ -29,7 +44,6 @@ async def process_pending_todos() -> None:
         return
 
     if not todos:
-        log.info("No pending todos found")
         return
 
     log.info("Found %d pending todos", len(todos))
@@ -40,33 +54,35 @@ async def process_pending_todos() -> None:
         target_iid = todo["target_iid"]
         project_id = todo["project_id"]
 
+        if min_age_seconds:
+            try:
+                created = datetime.fromisoformat(
+                    todo["created_at"].replace("Z", "+00:00"))
+                age = time.time() - created.timestamp()
+                if age < min_age_seconds:
+                    continue  # webhook path is likely still on it
+            except Exception:
+                pass
+
         log.info(
             "Pending todo: %s on %s #%s in project %s — %s",
             action, target_type, target_iid, project_id,
             todo["target_title"],
         )
 
-        # For now, just log pending todos so we can see what was missed.
-        # We mark them as done to avoid reprocessing on next restart.
-        # In the future, we could replay these as synthetic webhook events.
-        #
-        # We DON'T auto-replay because:
-        # 1. The todo might have already been processed (webhook arrived before crash)
-        # 2. Re-processing could create duplicate MRs or comments
-        # 3. Better to let the user re-assign or re-mention if needed
-        #
-        # What we DO is: check if the bot has already commented on the target.
-        # If not, it's genuinely missed and we should process it.
-
-        already_handled = _check_if_handled(project_id, target_type, target_iid)
-        if already_handled:
+        if action == "mentioned":
+            handled = _mention_handled(project_id, target_type, target_iid,
+                                       todo.get("body") or "")
+        else:
+            handled = _check_if_handled(project_id, target_type, target_iid)
+        if handled:
             log.info("  -> Already handled, marking todo as done")
             _safe_mark_done(todo["id"])
             continue
 
         log.warning(
-            "  -> MISSED: %s #%s was never handled. Re-processing...",
-            target_type, target_iid,
+            "  -> MISSED: %s todo on %s #%s was never handled. Re-processing...",
+            action, target_type, target_iid,
         )
 
         try:
@@ -102,6 +118,77 @@ def _check_if_handled(project_id: int, target_type: str, target_iid: int) -> boo
         return False
 
 
+def _find_note_discussion(target, body: str) -> tuple[str, int] | None:
+    """Locate the note whose body matches; return (discussion_id, note_id)."""
+    if not body:
+        return None
+    try:
+        for d in target.discussions.list(get_all=True):
+            for n in d.attributes.get("notes", []):
+                if not n.get("system") and (n.get("body") or "").strip() == body.strip():
+                    return d.id, n["id"]
+    except Exception:
+        pass
+    return None
+
+
+def _mention_handled(project_id: int, target_type: str, target_iid: int,
+                     body: str) -> bool:
+    """A mention todo is handled iff the bot replied in the mentioning
+    comment's own thread AFTER it (one thread per session makes this exact —
+    any bot comment elsewhere on a busy multi-session issue proves nothing).
+    """
+    from gitbot.config import settings
+    bot = settings.bot_username
+
+    try:
+        gl = glc.get_client()
+        project = gl.projects.get(project_id)
+        if target_type == "Issue":
+            target = project.issues.get(target_iid)
+        elif target_type == "MergeRequest":
+            target = project.mergerequests.get(target_iid)
+        else:
+            return False
+
+        loc = _find_note_discussion(target, body)
+        if loc is None:
+            # Mentioning note edited or deleted — can't match; fall back to
+            # the coarse check rather than replaying into the wrong context.
+            return _check_if_handled(project_id, target_type, target_iid)
+        discussion_id, note_id = loc
+        disc = target.discussions.get(discussion_id)
+        seen_mention = False
+        for n in disc.attributes.get("notes", []):
+            if n["id"] == note_id:
+                seen_mention = True
+                continue
+            if seen_mention and not n.get("system") \
+                    and n.get("author", {}).get("username") == bot:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def ack_comment_todos(project_id: int, target_type: str, target_iid: int,
+                      comment_body: str) -> None:
+    """Positive ack: a comment-callout session finished — mark the matching
+    pending mention todo(s) done, like a user ticking off their TODO page."""
+    try:
+        for todo in glc.get_pending_todos():
+            if (todo["project_id"] == project_id
+                    and todo["target_type"] == target_type
+                    and todo["target_iid"] == target_iid
+                    and _ACTION_MAP.get(todo["action"]) == "mentioned"
+                    and (todo.get("body") or "").strip() == comment_body.strip()):
+                _safe_mark_done(todo["id"])
+                log.info("Acked mention todo %s on %s #%s",
+                         todo["id"], target_type, target_iid)
+    except Exception:
+        log.warning("Could not ack mention todos", exc_info=True)
+
+
 async def _replay_todo(
     project_id: int, target_type: str, target_iid: int, action: str, todo: dict
 ) -> None:
@@ -122,6 +209,30 @@ async def _replay_todo(
     sit.target_iid = target_iid
     sit.actor = "system"  # replayed, not a real user event
     sit.is_replay = True
+
+    if action == "mentioned":
+        # A missed comment callout: replay as a Note Hook (answer/steer/task
+        # triage), NOT as an assignment — replaying a mention as task work
+        # was how interrupted side questions resurrected whole issues.
+        if target_type == "Issue":
+            t = project.issues.get(target_iid)
+        else:
+            t = project.mergerequests.get(target_iid)
+        sit.target_title = t.title
+        sit.target_description = t.description or ""
+        sit.target_state = t.state
+        sit.event_type = "Note Hook"
+        sit.trigger = "mentioned"
+        sit.comment_body = todo.get("body") or f"@{settings.bot_username}"
+        sit.actor = todo.get("author") or "system"
+        loc = _find_note_discussion(t, todo.get("body") or "")
+        if loc:
+            sit.discussion_id = loc[0]
+        from gitbot import state
+        sit.pending_question = state.get_pending_question(
+            project_id, target_type, target_iid)
+        await decide_and_act(sit)
+        return
 
     if target_type == "Issue":
         issue = project.issues.get(target_iid)
@@ -174,6 +285,14 @@ async def reconcile() -> None:
     while workflows are active — targets whose lock is currently held are skipped.
     """
     from gitbot import locks
+
+    # TODO ledger first: pending mention/assignment todos older than the
+    # grace window are work the bot never finished (interrupted callouts have
+    # no label/state to find them by — the todo is the only trace).
+    try:
+        await process_pending_todos(min_age_seconds=_TODO_MIN_AGE_SECONDS)
+    except Exception:
+        log.exception("Reconcile: todo sweep failed")
 
     found: dict[tuple[int, str, int], dict] = {}
     for label in _WORKING_LABELS + _PARKED_LABELS + _QUEUED_LABELS:

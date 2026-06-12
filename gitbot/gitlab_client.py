@@ -264,6 +264,7 @@ def get_pending_todos() -> list[dict]:
             "project_id": t.project.get("id") if isinstance(t.project, dict) else getattr(t.project, "id", None),
             "body": t.body,
             "created_at": t.created_at,
+            "author": (t.author or {}).get("username") if isinstance(t.author, dict) else None,
         }
         for t in todos
     ]
