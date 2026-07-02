@@ -51,8 +51,43 @@ def _get_db() -> sqlite3.Connection:
             CREATE INDEX IF NOT EXISTS idx_work_target
             ON work_items (project_id, target_type, target_iid, status)
         """)
+        # Group webhooks GitBot created and manages (issue #35). Our record of
+        # what we own, so the admin panel has a source of truth independent of
+        # live GitLab reads and can detect drift.
+        _db.execute("""
+            CREATE TABLE IF NOT EXISTS managed_hooks (
+                group_id INTEGER PRIMARY KEY,
+                group_path TEXT,
+                hook_id INTEGER,
+                url TEXT,
+                created_at REAL NOT NULL
+            )
+        """)
         _db.commit()
     return _db
+
+
+def record_managed_hook(group_id: int, group_path: str, hook_id: int, url: str) -> None:
+    """Record (or update) a group webhook GitBot owns."""
+    db = _get_db()
+    db.execute(
+        """INSERT OR REPLACE INTO managed_hooks
+           (group_id, group_path, hook_id, url, created_at) VALUES (?, ?, ?, ?, ?)""",
+        (group_id, group_path, hook_id, url, time.time()),
+    )
+    db.commit()
+
+
+def delete_managed_hook(group_id: int) -> None:
+    db = _get_db()
+    db.execute("DELETE FROM managed_hooks WHERE group_id=?", (group_id,))
+    db.commit()
+
+
+def list_managed_hooks() -> list[dict]:
+    db = _get_db()
+    rows = db.execute("SELECT * FROM managed_hooks ORDER BY group_path").fetchall()
+    return [dict(r) for r in rows]
 
 
 def create_work_item(
