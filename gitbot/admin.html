@@ -126,6 +126,16 @@
     </div>
   </div>
 
+  <!-- Groups: enable GitBot per group (creates & manages the webhook) -->
+  <h2>Groups <span style="font-size:0.75rem;color:#484f58">— enable GitBot per group; we create &amp; manage the webhook</span></h2>
+  <div style="margin-bottom:0.5rem;display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+    <input id="grpToken" type="password" placeholder="Optional: token to discover with (else uses the configured token)"
+           style="flex:1;min-width:280px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px;font-size:0.8rem">
+    <button class="btn primary" onclick="discoverGroups()">Discover groups</button>
+    <span id="grpMsg" style="font-size:0.8rem"></span>
+  </div>
+  <div id="groupList"></div>
+
   <!-- Stats -->
   <div class="grid" id="statsGrid"></div>
 
@@ -421,6 +431,95 @@ async function saveThreshold() {
     msg.textContent = r.ok ? '✓' : '✗';
   } catch(e) { msg.textContent = '✗'; }
   setTimeout(() => { msg.textContent = ''; }, 2000);
+}
+
+// ---- Groups (issue #35) — on-demand, not part of the 3s refresh loop ----
+let groupToken = '';
+function webhookUrl() { return window.location.origin + '/webhook'; }
+
+async function discoverGroups() {
+  const msg = document.getElementById('grpMsg');
+  msg.textContent = 'Discovering…';
+  groupToken = document.getElementById('grpToken').value.trim();
+  try {
+    const r = await fetch(`${API}/groups/list`, {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token: groupToken, webhook_url: webhookUrl()})});
+    const d = await r.json();
+    if (d.status !== 'ok') { msg.innerHTML = `<span class="badge error">${d.error||'error'}</span>`; return; }
+    msg.innerHTML = d.webhook_secret_set ? '' : '<span class="badge warn">Set a webhook secret before enabling</span>';
+    renderGroups(d.groups);
+  } catch(e) { msg.innerHTML = `<span class="badge error">${e}</span>`; }
+}
+
+function renderGroups(groups) {
+  const el = document.getElementById('groupList');
+  if (!groups || !groups.length) {
+    el.innerHTML = '<div style="color:#484f58;font-size:0.8rem">No owned groups found for this token (group hooks need Owner).</div>';
+    return;
+  }
+  el.innerHTML = '<table><thead><tr><th>Group</th><th>GitBot</th><th></th></tr></thead><tbody>' +
+    groups.map(g => {
+      const depth = g.full_path.split('/').length - 1;
+      const indent = depth * 16 + 8;
+      let status, action;
+      if (g.enabled) {
+        status = '<span class="badge ok">enabled</span>';
+        action = `<button class="btn" onclick="toggleGroup(${g.id}, '${g.full_path}', false)">Disable</button>`;
+      } else if (g.covered_by) {
+        status = `<span class="badge" style="background:#30363d">covered by ${g.covered_by}</span>`;
+        action = '';
+      } else {
+        status = '<span style="color:#8b949e">off</span>';
+        action = `<button class="btn primary" onclick="toggleGroup(${g.id}, '${g.full_path}', true)">Enable</button>`;
+      }
+      return `<tr><td style="padding-left:${indent}px"><a href="${g.web_url}" target="_blank" style="color:#c9d1d9">${g.full_path}</a></td><td>${status}</td><td>${action}</td></tr>`;
+    }).join('') + '</tbody></table>';
+}
+
+// Animated "phase…" indicator so a multi-second GitLab call never looks stuck.
+let grpAnim = null;
+function grpPhase(label) {
+  const msg = document.getElementById('grpMsg');
+  clearInterval(grpAnim);
+  let n = 0;
+  const tick = () => { msg.innerHTML = `<span style="color:#8b949e">${label}${'.'.repeat(n++ % 3 + 1)}</span>`; };
+  tick(); grpAnim = setInterval(tick, 400);
+}
+function grpDone(html) { clearInterval(grpAnim); grpAnim = null; document.getElementById('grpMsg').innerHTML = html; }
+const JH = {'Content-Type':'application/json'};
+
+async function toggleGroup(id, path, enable) {
+  const body = {group_id: id, full_path: path, token: groupToken, webhook_url: webhookUrl()};
+  try {
+    if (!enable) {
+      grpPhase('Removing group trigger');
+      const d = await (await fetch(`${API}/groups/disable`, {method:'POST', headers:JH, body:JSON.stringify(body)})).json();
+      grpDone(d.status === 'ok' ? `<span class="badge ok">${d.message}</span>` : `<span class="badge error">${d.error||d.message}</span>`);
+      discoverGroups();
+      return;
+    }
+    // Phase 1: scan (idempotency + coverage + conflict check).
+    grpPhase('Checking projects for existing triggers');
+    const s = await (await fetch(`${API}/groups/scan`, {method:'POST', headers:JH, body:JSON.stringify(body)})).json();
+    if (s.status === 'already') { grpDone('<span class="badge ok">Already enabled</span>'); discoverGroups(); return; }
+    if (s.status === 'covered') { grpDone(`<span class="badge error">A parent group already has GitBot enabled</span>`); return; }
+    if (s.status !== 'ok') { grpDone(`<span class="badge error">${s.error || 'error'}</span>`); return; }
+
+    let cleanup = false;
+    const overlaps = s.overlaps || [];
+    if (overlaps.length) {
+      clearInterval(grpAnim);
+      const note = s.truncated ? '\n\n(scan truncated — more may exist)' : '';
+      if (!confirm(`These ${overlaps.length} project(s) already have a GitBot webhook and would double-fire:\n\n${overlaps.map(o => o.path).join('\n')}${note}\n\nRemove them and enable the group trigger instead?`)) { grpDone(''); return; }
+      cleanup = true;
+    }
+    // Phase 2: create the group trigger.
+    grpPhase('Creating group trigger');
+    const d = await (await fetch(`${API}/groups/create`, {method:'POST', headers:JH, body:JSON.stringify({...body, cleanup, overlaps})})).json();
+    grpDone(d.status === 'ok' ? `<span class="badge ok">${d.message}</span>` : `<span class="badge error">${d.error||d.message}</span>`);
+    discoverGroups();
+  } catch(e) { grpDone(`<span class="badge error">${e}</span>`); }
 }
 
 function refresh() { fetchStats(); fetchAll(); }

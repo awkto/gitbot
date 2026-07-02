@@ -326,6 +326,150 @@ def remove_mr_labels(project_id: int, mr_iid: int, labels: list[str]) -> None:
     mr.save()
 
 
+# ---------------------------------------------------------------------------
+# Group webhook management (admin onboarding — issue #35)
+#
+# Lets the admin panel discover the groups a token owns and turn GitBot on/off
+# per group by creating/deleting the group webhook itself. GitBot owns the hook
+# lifecycle so the event set, URL and secret are always correct, and the
+# double-delivery footgun (#17) is prevented by the overlap guard.
+# ---------------------------------------------------------------------------
+
+# Mirrors the per-project hooks GitBot has always used, so a group hook behaves
+# identically to today's setup. No push events — GitBot acts on issues, notes
+# and MRs.
+GROUP_HOOK_EVENTS = {
+    "issues_events": True,
+    "confidential_issues_events": True,
+    "note_events": True,
+    "confidential_note_events": True,
+    "merge_requests_events": True,
+    "push_events": False,
+}
+
+
+def _make_client(token: str | None = None, url: str | None = None) -> gitlab.Gitlab:
+    """A client using an override token/url (onboarding), or the configured one.
+
+    Passing no override returns the cached, configured client (the common
+    single-tenant path). A pasted onboarding token builds a transient client.
+    """
+    if not token and not url:
+        return get_client()
+    return gitlab.Gitlab(
+        url or settings.gitlab_url,
+        private_token=token or settings.gitlab_token,
+        ssl_verify=settings.gitlab_ssl_verify,
+    )
+
+
+def _hook_is_ours(hook_url: str, our_url: str) -> bool:
+    """Match a hook to this GitBot instance by URL (host + /webhook path)."""
+    if not hook_url or not our_url:
+        return False
+    if hook_url.rstrip("/") == our_url.rstrip("/"):
+        return True
+    try:
+        from urllib.parse import urlparse
+        a, b = urlparse(hook_url), urlparse(our_url)
+        return a.netloc == b.netloc and a.path.rstrip("/") == b.path.rstrip("/")
+    except Exception:
+        return False
+
+
+def list_owned_groups(token: str | None = None, url: str | None = None) -> list[dict]:
+    """Groups (incl. subgroups) where the token has Owner — the ones whose
+    webhooks it can manage."""
+    gl = _make_client(token, url)
+    groups = gl.groups.list(min_access_level=50, all_available=False, get_all=True)
+    return [
+        {
+            "id": g.id,
+            "name": g.name,
+            "full_path": g.full_path,
+            "parent_id": getattr(g, "parent_id", None),
+            "web_url": g.web_url,
+        }
+        for g in groups
+    ]
+
+
+def list_group_hooks(group_id: int, token: str | None = None) -> list[dict]:
+    gl = _make_client(token)
+    group = gl.groups.get(group_id)
+    return [{"id": h.id, "url": h.url} for h in group.hooks.list(get_all=True)]
+
+
+def group_parent_id(group_id: int, token: str | None = None) -> int | None:
+    gl = _make_client(token)
+    return getattr(gl.groups.get(group_id), "parent_id", None)
+
+
+def create_group_hook(
+    group_id: int, hook_url: str, secret: str, token: str | None = None
+) -> int:
+    gl = _make_client(token)
+    group = gl.groups.get(group_id)
+    attrs = {
+        "url": hook_url,
+        "token": secret,
+        "enable_ssl_verification": settings.gitlab_ssl_verify,
+        **GROUP_HOOK_EVENTS,
+    }
+    hook = group.hooks.create(attrs)
+    return hook.id
+
+
+def delete_group_hook(group_id: int, hook_id: int, token: str | None = None) -> None:
+    gl = _make_client(token)
+    gl.groups.get(group_id).hooks.delete(hook_id)
+
+
+def delete_project_hook(project_id: int, hook_id: int, token: str | None = None) -> None:
+    gl = _make_client(token)
+    gl.projects.get(project_id).hooks.delete(hook_id)
+
+
+def scan_project_hook_overlaps(
+    group_id: int, our_url: str, token: str | None = None, cap: int = 300
+) -> dict:
+    """Find project webhooks (in this group + subgroups) already pointing at us.
+
+    A group hook plus a project hook on the same project = two deliveries = two
+    paid runs. Callers refuse or clean these before creating the group hook.
+
+    The per-project hook reads run concurrently (each worker uses its own
+    client) — a large group is 50+ API calls that are otherwise seconds of
+    sequential latency.
+    """
+    import concurrent.futures as cf
+
+    gl = _make_client(token)
+    group = gl.groups.get(group_id)
+    projects = group.projects.list(include_subgroups=True, get_all=True)
+    truncated = len(projects) > cap
+    targets = [(p.id, p.path_with_namespace) for p in projects[:cap]]
+
+    def _check(item):
+        pid, path = item
+        try:
+            cl = _make_client(token)  # own client per thread (session safety)
+            for h in cl.projects.get(pid).hooks.list(get_all=True):
+                if _hook_is_ours(h.url, our_url):
+                    return {"project_id": pid, "path": path, "hook_id": h.id}
+        except Exception:
+            return None
+        return None
+
+    overlaps = []
+    if targets:
+        with cf.ThreadPoolExecutor(max_workers=min(12, len(targets))) as ex:
+            for r in ex.map(_check, targets):
+                if r:
+                    overlaps.append(r)
+    return {"overlaps": overlaps, "scanned": len(targets), "truncated": truncated}
+
+
 def find_items_by_label(label: str) -> list[dict]:
     """Find open issues and MRs across all accessible projects with a given label.
 
