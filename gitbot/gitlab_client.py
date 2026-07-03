@@ -470,6 +470,104 @@ def scan_project_hook_overlaps(
     return {"overlaps": overlaps, "scanned": len(targets), "truncated": truncated}
 
 
+# ---------------------------------------------------------------------------
+# Service-account provisioning (onboarding — issue #36, self-hosted Tier A)
+#
+# An admin token, used once at onboarding, creates/adopts GitBot's single
+# dedicated bot user, mints a scoped day-to-day token for it, and grants it
+# membership on the groups being enabled. The admin token is never persisted.
+# ---------------------------------------------------------------------------
+
+def token_is_admin(token: str, url: str | None = None) -> bool:
+    gl = _make_client(token, url)
+    gl.auth()
+    return bool(getattr(gl.user, "is_admin", False))
+
+
+def list_all_groups(token: str | None = None, url: str | None = None) -> list[dict]:
+    """Every group visible to the token (admin sees all) — for onboarding."""
+    gl = _make_client(token, url)
+    groups = gl.groups.list(all_available=True, get_all=True)
+    return [
+        {"id": g.id, "name": g.name, "full_path": g.full_path,
+         "parent_id": getattr(g, "parent_id", None), "web_url": g.web_url}
+        for g in groups
+    ]
+
+
+def find_user_by_username(username: str, token: str | None = None) -> dict | None:
+    gl = _make_client(token)
+    users = gl.users.list(username=username)
+    if users:
+        u = users[0]
+        return {"id": u.id, "username": u.username, "name": u.name}
+    return None
+
+
+def is_service_account(user_id: int, token: str | None = None) -> bool:
+    """True if the user id is an instance service account (admin-only list)."""
+    gl = _make_client(token)
+    try:
+        for sa in gl.http_list("/service_accounts", get_all=True):
+            if sa.get("id") == user_id:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def create_service_account(name: str, username: str, token: str | None = None) -> dict:
+    gl = _make_client(token)
+    data = {}
+    if name:
+        data["name"] = name
+    if username:
+        data["username"] = username
+    sa = gl.http_post("/service_accounts", post_data=data)
+    return {"id": sa["id"], "username": sa.get("username"), "name": sa.get("name")}
+
+
+def create_user_token(
+    user_id: int, name: str, token: str | None = None,
+    scopes: list[str] | None = None, days: int = 364,
+) -> dict:
+    """Mint a personal access token for a user (admin). Returns the raw token
+    string (shown once by GitLab)."""
+    import datetime
+    gl = _make_client(token)
+    expires = (datetime.date.today() + datetime.timedelta(days=days)).isoformat()
+    user = gl.users.get(user_id, lazy=True)
+    pat = user.personal_access_tokens.create(
+        {"name": name, "scopes": scopes or ["api"], "expires_at": expires}
+    )
+    return {"token": pat.token, "id": pat.id, "expires_at": getattr(pat, "expires_at", expires)}
+
+
+def ensure_group_membership(
+    group_id: int, user_id: int, access_level: int, token: str | None = None
+) -> str:
+    """Add (or update) a user's membership in a group. Idempotent."""
+    gl = _make_client(token)
+    try:
+        gl.http_post(
+            f"/groups/{group_id}/members",
+            post_data={"user_id": user_id, "access_level": access_level},
+        )
+        return "added"
+    except Exception as e:
+        msg = str(e).lower()
+        if "409" in msg or "already" in msg or "member" in msg:
+            try:
+                gl.http_put(
+                    f"/groups/{group_id}/members/{user_id}",
+                    post_data={"access_level": access_level},
+                )
+                return "updated"
+            except Exception:
+                return "exists"
+        raise
+
+
 def find_items_by_label(label: str) -> list[dict]:
     """Find open issues and MRs across all accessible projects with a given label.
 
