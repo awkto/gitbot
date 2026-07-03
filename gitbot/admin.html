@@ -126,6 +126,29 @@
     </div>
   </div>
 
+  <!-- Onboarding: provision the service account with an admin token -->
+  <h2>Onboarding <span style="font-size:0.75rem;color:#484f58">— provision GitBot's service account with a one-time admin token</span></h2>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:0.75rem;margin-bottom:1rem">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem">
+      <label style="font-size:0.7rem;color:#8b949e">Admin token (used once, not stored)<br>
+        <input id="obToken" type="password" placeholder="glpat-… (instance admin)" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px;font-size:0.8rem"></label>
+      <label style="font-size:0.7rem;color:#8b949e">Service account name (username)<br>
+        <input id="obName" placeholder="gitbot" value="gitbot" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px;font-size:0.8rem"></label>
+      <label style="font-size:0.7rem;color:#8b949e">Role on enabled groups<br>
+        <select id="obRole" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px;font-size:0.8rem">
+          <option value="40" selected>Maintainer</option><option value="30">Developer</option><option value="50">Owner</option></select></label>
+      <label style="font-size:0.7rem;color:#8b949e;display:flex;align-items:end;gap:0.4rem;padding-bottom:0.3rem">
+        <input id="obApply" type="checkbox"> Use as GitBot identity now (swaps the running token)</label>
+    </div>
+    <div style="margin-top:0.6rem">
+      <button class="btn primary" onclick="obDiscover()">Discover groups (admin)</button>
+      <button class="btn" onclick="obProvision()">Provision service account</button>
+      <span id="obMsg" style="margin-left:0.5rem;font-size:0.8rem"></span>
+    </div>
+    <div id="obGroups" style="margin-top:0.5rem"></div>
+    <div id="obResult" style="margin-top:0.5rem"></div>
+  </div>
+
   <!-- Groups: enable GitBot per group (creates & manages the webhook) -->
   <h2>Groups <span style="font-size:0.75rem;color:#484f58">— enable GitBot per group; we create &amp; manage the webhook</span></h2>
   <div style="margin-bottom:0.5rem;display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
@@ -520,6 +543,63 @@ async function toggleGroup(id, path, enable) {
     grpDone(d.status === 'ok' ? `<span class="badge ok">${d.message}</span>` : `<span class="badge error">${d.error||d.message}</span>`);
     discoverGroups();
   } catch(e) { grpDone(`<span class="badge error">${e}</span>`); }
+}
+
+// ---- Onboarding (issue #36): provision the service account via admin token ----
+let obGroupList = [];
+async function obDiscover() {
+  const msg = document.getElementById('obMsg');
+  const tok = document.getElementById('obToken').value.trim();
+  if (!tok) { msg.innerHTML = '<span class="badge error">enter an admin token</span>'; return; }
+  msg.innerHTML = '<span style="color:#8b949e">Discovering groups…</span>';
+  try {
+    const d = await (await fetch(`${API}/onboard/discover`, {method:'POST', headers:JH,
+      body: JSON.stringify({admin_token: tok, webhook_url: webhookUrl()})})).json();
+    if (d.status !== 'ok') { msg.innerHTML = `<span class="badge error">${d.error}</span>`; return; }
+    obGroupList = d.groups;
+    msg.innerHTML = d.webhook_secret_set ? `<span class="badge ok">${d.groups.length} groups</span>`
+      : '<span class="badge warn">no webhook secret — memberships only, no hooks</span>';
+    document.getElementById('obGroups').innerHTML =
+      '<div style="font-size:0.75rem;color:#8b949e;margin-bottom:0.3rem">Select groups to enable (membership + webhook):</div>' +
+      obGroupList.map(g => {
+        const depth = g.full_path.split('/').length - 1;
+        return `<label style="display:block;padding:0.1rem 0;padding-left:${depth*16}px;font-size:0.8rem">
+          <input type="checkbox" class="ob-grp" value="${g.id}" ${g.enabled?'checked':''}> ${g.full_path}
+          ${g.enabled?'<span class="badge ok" style="font-size:0.6rem">webhook on</span>':''}</label>`;
+      }).join('');
+  } catch(e) { msg.innerHTML = `<span class="badge error">${e}</span>`; }
+}
+
+async function obProvision() {
+  const msg = document.getElementById('obMsg');
+  const tok = document.getElementById('obToken').value.trim();
+  const name = document.getElementById('obName').value.trim();
+  if (!tok || !name) { msg.innerHTML = '<span class="badge error">admin token + name required</span>'; return; }
+  const gids = [...document.querySelectorAll('.ob-grp:checked')].map(c => parseInt(c.value));
+  const apply = document.getElementById('obApply').checked;
+  const warn = apply ? '\n\nThis will SWITCH the running GitBot to authenticate as this account.' : '';
+  if (!confirm(`Provision service account "${name}" and enable ${gids.length} group(s)?${warn}`)) return;
+  msg.innerHTML = '<span style="color:#8b949e">Provisioning…</span>';
+  try {
+    const d = await (await fetch(`${API}/onboard/provision`, {method:'POST', headers:JH,
+      body: JSON.stringify({admin_token: tok, sa_name: name, access_level: parseInt(document.getElementById('obRole').value),
+        group_ids: gids, webhook_url: webhookUrl(), apply_identity: apply})})).json();
+    if (d.status !== 'ok') { msg.innerHTML = `<span class="badge error">${d.error}</span>`; return; }
+    msg.innerHTML = `<span class="badge ok">${d.adopted?'adopted':'created'} @${d.username}${d.applied?' — now active':''}</span>`;
+    const rows = (d.groups||[]).map(g => {
+      const gg = obGroupList.find(x => x.id === g.group_id);
+      return `<div style="font-size:0.75rem">• ${gg?gg.full_path:g.group_id}: membership=${g.membership||g.membership_error||'-'}, hook=${g.hook||g.hook_error||'—'}</div>`;
+    }).join('');
+    document.getElementById('obResult').innerHTML = `
+      <div style="background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:0.5rem">
+        <div style="font-size:0.8rem;color:#e6edf3;margin-bottom:0.3rem">Service account <strong>@${d.username}</strong> (id ${d.user_id})${d.adopted?' (adopted existing)':''}</div>
+        <div style="font-size:0.75rem;color:#f0883e;margin-bottom:0.3rem">Day-to-day token (shown once — copy it now, expires ${d.expires_at||'?'}):</div>
+        <input readonly value="${d.token}" onclick="this.select()" style="width:100%;background:#161b22;border:1px solid #30363d;color:#3fb950;padding:0.3rem;border-radius:4px;font-family:monospace;font-size:0.75rem">
+        <div style="font-size:0.7rem;color:#8b949e;margin-top:0.3rem">${d.applied?'GitBot is now using this token live. To persist across restarts, set GITBOT_GITLAB_TOKEN + GITBOT_BOT_USERNAME in your deployment.':'Set GITBOT_GITLAB_TOKEN + GITBOT_BOT_USERNAME to this to run GitBot as this account.'}</div>
+        ${rows}
+      </div>`;
+    fetchStats();
+  } catch(e) { msg.innerHTML = `<span class="badge error">${e}</span>`; }
 }
 
 function refresh() { fetchStats(); fetchAll(); }

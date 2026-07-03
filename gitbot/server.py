@@ -527,3 +527,134 @@ async def admin_groups_disable(request: Request):
     state.delete_managed_hook(group_id)
     log.info("Disabled GitBot on group %s (%d hook(s) removed)", group_id, removed)
     return {"status": "ok", "message": f"Disabled ({removed} hook(s) removed)"}
+
+
+# ---------------------------------------------------------------------------
+# Service-account onboarding (issue #36, self-hosted Tier A)
+#
+# Onboard with ONE admin token: discover groups, then provision GitBot's single
+# service account — create/adopt the bot user, mint its day-to-day token, grant
+# membership + create the webhook on each selected group. The admin token is
+# used transiently and never stored.
+# ---------------------------------------------------------------------------
+
+@app.post("/admin/api/onboard/discover")
+async def admin_onboard_discover(request: Request):
+    _check_admin()
+    data = await request.json()
+    admin_token = (data.get("admin_token") or "").strip() or None
+    our_url = (data.get("webhook_url") or "").strip()
+    if not admin_token:
+        return JSONResponse({"status": "error", "error": "admin token required"}, status_code=400)
+    from gitbot import gitlab_client as glc
+
+    def _discover():
+        if not glc.token_is_admin(admin_token):
+            return {"error": "not_admin"}
+        groups = glc.list_all_groups(admin_token)
+        for g in groups:
+            try:
+                hooks = glc.list_group_hooks(g["id"], admin_token)
+                g["enabled"] = any(glc._hook_is_ours(h["url"], our_url) for h in hooks)
+            except Exception:
+                g["enabled"] = False
+        groups.sort(key=lambda x: x["full_path"])
+        return {"groups": groups}
+
+    try:
+        r = await asyncio.to_thread(_discover)
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
+    if r.get("error") == "not_admin":
+        return JSONResponse(
+            {"status": "error", "error": "This token is not an instance admin. "
+             "Creating a service account needs an admin token — or create the bot "
+             "user manually and enter its token instead."}, status_code=400)
+    return {"status": "ok", "groups": r["groups"],
+            "webhook_secret_set": bool(settings.webhook_secret)}
+
+
+@app.post("/admin/api/onboard/provision")
+async def admin_onboard_provision(request: Request):
+    _check_admin()
+    data = await request.json()
+    admin_token = (data.get("admin_token") or "").strip() or None
+    sa_name = (data.get("sa_name") or "").strip()            # desired username
+    display_name = (data.get("display_name") or sa_name or "GitBot").strip()
+    group_ids = data.get("group_ids") or []
+    role = int(data.get("access_level") or 40)               # 40 = Maintainer
+    our_url = (data.get("webhook_url") or "").strip()
+    apply_identity = bool(data.get("apply_identity"))
+    if not admin_token or not sa_name:
+        return JSONResponse({"status": "error", "error": "admin_token and sa_name required"},
+                            status_code=400)
+    if group_ids and our_url and not settings.webhook_secret:
+        return JSONResponse({"status": "error", "error": _GROUPS_SECRET_MSG}, status_code=400)
+    from gitbot import gitlab_client as glc
+
+    def _provision():
+        if not glc.token_is_admin(admin_token):
+            return {"error": "This token is not an instance admin."}
+        # Resolve the bot user: adopt only if it already exists AND is a service account.
+        existing = glc.find_user_by_username(sa_name, admin_token)
+        if existing:
+            if not glc.is_service_account(existing["id"], admin_token):
+                return {"error": f"User '{sa_name}' exists but is not a service account — "
+                                 "choose another name."}
+            user_id = existing["id"]
+            adopted = True
+        else:
+            sa = glc.create_service_account(display_name, sa_name, admin_token)
+            user_id = sa["id"]
+            adopted = False
+        # Mint the day-to-day token.
+        tok = glc.create_user_token(user_id, "gitbot", admin_token)
+        # Membership + webhook per selected group.
+        groups_out = []
+        for gid in group_ids:
+            gr = {"group_id": gid}
+            try:
+                gr["membership"] = glc.ensure_group_membership(gid, user_id, role, admin_token)
+            except Exception as e:
+                gr["membership_error"] = str(e)[:140]
+            if our_url and settings.webhook_secret:
+                try:
+                    hooks = glc.list_group_hooks(gid, admin_token)
+                    ex = [h for h in hooks if glc._hook_is_ours(h["url"], our_url)]
+                    if ex:
+                        gr["hook"] = "exists"; gr["hook_id"] = ex[0]["id"]
+                    else:
+                        gr["hook_id"] = glc.create_group_hook(
+                            gid, our_url, settings.webhook_secret, admin_token)
+                        gr["hook"] = "created"
+                except Exception as e:
+                    gr["hook_error"] = str(e)[:140]
+            groups_out.append(gr)
+        return {"user_id": user_id, "username": sa_name, "adopted": adopted,
+                "token": tok["token"], "expires_at": tok.get("expires_at"),
+                "groups": groups_out}
+
+    try:
+        r = await asyncio.to_thread(_provision)
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
+    if r.get("error"):
+        return JSONResponse({"status": "error", "error": r["error"]}, status_code=400)
+
+    # Record managed hooks (main thread — sqlite is thread-bound).
+    from gitbot import state
+    for gr in r["groups"]:
+        if gr.get("hook_id"):
+            state.record_managed_hook(gr["group_id"], "", gr["hook_id"], our_url)
+
+    # Optionally switch the running GitBot to act as the new identity now.
+    if apply_identity:
+        from gitbot import gitlab_client as glc
+        settings.gitlab_token = r["token"]
+        settings.bot_username = r["username"]
+        glc._gl = None  # drop cached client so the new token is used immediately
+        r["applied"] = True
+        log.info("GitBot identity switched to @%s (id %s) via onboarding",
+                 r["username"], r["user_id"])
+    r["status"] = "ok"
+    return r
