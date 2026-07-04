@@ -1,9 +1,54 @@
-import logging
-from pathlib import Path
+"""Layered configuration.
 
-from pydantic_settings import BaseSettings
+Precedence, highest first:
+  1. Real environment variables (GITBOT_*) — automation owns these; the app
+     never overrides them and the admin UI shows them read-only.
+  2. The persisted store (data/config.json, inside the data volume) — what the
+     admin panel and onboarding write. Survives container recreation.
+  3. A legacy .env file — seed for old deployments; a UI edit (store) beats it.
+  4. Built-in defaults.
+
+This is the standard "env wins" pattern (Grafana/Gitea-style): declarative
+deployments stay deterministic, UI-driven deployments persist their edits, and
+hybrids work per-key.
+"""
+
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+from pydantic import TypeAdapter
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
 log = logging.getLogger(__name__)
+
+# Overridable so tests can point at a scratch store.
+STORE_PATH = Path(os.environ.get("GITBOT_CONFIG_STORE", "data/config.json"))
+
+
+def read_store() -> dict:
+    """The persisted runtime config (empty when none has been written)."""
+    try:
+        return json.loads(STORE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+class _StoreSource(PydanticBaseSettingsSource):
+    """pydantic-settings source backed by the JSON store."""
+
+    def __init__(self, settings_cls):
+        super().__init__(settings_cls)
+        self._data = read_store()
+
+    def get_field_value(self, field, field_name):  # pragma: no cover - unused hook
+        return self._data.get(field_name), field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        return {k: v for k, v in self._data.items()
+                if k in self.settings_cls.model_fields and v is not None}
 
 
 class Settings(BaseSettings):
@@ -58,7 +103,8 @@ class Settings(BaseSettings):
     # State
     state_db_path: str = "data/gitbot.db"
 
-    # Admin panel
+    # Admin panel. When admin_password is set, /admin and /admin/api/* require
+    # HTTP Basic auth (any username, this password).
     admin_enabled: bool = True
     admin_password: str = ""
 
@@ -70,6 +116,15 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8042
 
+    @classmethod
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings,
+        dotenv_settings, file_secret_settings,
+    ):
+        # env wins over the store; the store wins over legacy .env and defaults.
+        return (init_settings, env_settings, _StoreSource(settings_cls),
+                dotenv_settings, file_secret_settings)
+
     @property
     def is_configured(self) -> bool:
         return bool(self.gitlab_token and self.anthropic_api_key)
@@ -79,31 +134,54 @@ class Settings(BaseSettings):
         return not self.is_configured
 
 
-_ENV_TEMPLATE = """\
-# GitBot Configuration
-# Edit this file and restart, or configure via the admin panel at /admin
-
-# GitLab
-GITBOT_GITLAB_URL=https://gitlab.example.com
-GITBOT_GITLAB_TOKEN=
-GITBOT_BOT_USERNAME=gitbot
-# GITBOT_GITLAB_SSL_VERIFY=true
-
-# Anthropic
-GITBOT_ANTHROPIC_API_KEY=sk-ant-...
-
-# Admin panel
-GITBOT_ADMIN_ENABLED=true
-"""
+def env_locked(key: str) -> bool:
+    """True when a real environment variable owns this key — the UI must not
+    edit it (env always wins, so a store write would be a silent no-op)."""
+    return f"GITBOT_{key.upper()}" in os.environ
 
 
-def ensure_env_file():
-    """Create a template .env if none exists."""
-    for path in [Path(".env"), Path("data/.env")]:
-        if path.exists():
-            return
-    Path(".env").write_text(_ENV_TEMPLATE)
-    log.info("Created template .env file — configure via /admin or edit .env")
+def config_sources() -> dict[str, str]:
+    """Per-key provenance for the admin UI: env (locked) / store / default.
+
+    Legacy .env values report as "default" — they behave like editable
+    defaults, since a store write overrides them."""
+    store = read_store()
+    out = {}
+    for key in Settings.model_fields:
+        if env_locked(key):
+            out[key] = "env"
+        elif key in store:
+            out[key] = "store"
+        else:
+            out[key] = "default"
+    return out
+
+
+def save_config(updates: dict) -> tuple[list[str], list[str]]:
+    """Persist UI-edited keys to the store and apply them live.
+
+    Env-owned keys are skipped (env wins). Returns (applied, locked)."""
+    store = read_store()
+    applied, locked = [], []
+    for key, value in updates.items():
+        if key not in Settings.model_fields:
+            continue
+        if env_locked(key):
+            locked.append(key)
+            continue
+        coerced = TypeAdapter(Settings.model_fields[key].annotation).validate_python(value)
+        store[key] = coerced
+        setattr(settings, key, coerced)
+        applied.append(key)
+    if applied:
+        STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        STORE_PATH.write_text(json.dumps(store, indent=2))
+        try:
+            STORE_PATH.chmod(0o600)
+        except Exception:  # pragma: no cover - permissions best-effort
+            pass
+        log.info("Config saved to store: %s", ", ".join(applied))
+    return applied, locked
 
 
 settings = Settings()

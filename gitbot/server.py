@@ -27,9 +27,6 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from gitbot.config import ensure_env_file
-    ensure_env_file()
-
     if settings.setup_needed:
         log.warning("GitBot is not configured. Visit /admin to set up.")
     else:
@@ -70,6 +67,35 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="GitBot", version=APP_VERSION, lifespan=lifespan)
+
+
+@app.middleware("http")
+async def admin_basic_auth(request: Request, call_next):
+    """HTTP Basic auth for the admin panel + API when a password is set.
+
+    Any username is accepted; only the password matters. /webhook and
+    /reconcile keep their own secret-header auth."""
+    if request.url.path.startswith("/admin") and settings.admin_password:
+        import base64
+        import secrets as _secrets
+
+        from fastapi.responses import Response
+
+        ok = False
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("basic "):
+            try:
+                creds = base64.b64decode(auth[6:]).decode()
+                _, _, password = creds.partition(":")
+                ok = _secrets.compare_digest(password, settings.admin_password)
+            except Exception:
+                ok = False
+        if not ok:
+            return Response(
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="GitBot Admin"'},
+            )
+    return await call_next(request)
 
 
 @app.get("/")
@@ -165,6 +191,8 @@ async def admin_stats():
             "review": settings.model_review,
         },
     }
+    from gitbot import config as cfg
+    stats["config"]["sources"] = cfg.config_sources()
     return stats
 
 
@@ -195,30 +223,39 @@ async def admin_debug_log(workflow_id: str):
     return {"workflow_id": workflow_id, "debug_log": debug_log}
 
 
+# Keys the Configure form may write. Everything else has a dedicated endpoint
+# (threshold, models) or is deployment-level (host/port/db path).
+_SAVEABLE_KEYS = {
+    "gitlab_url", "gitlab_token", "bot_username", "gitlab_ssl_verify",
+    "webhook_secret", "anthropic_api_key", "admin_password",
+}
+_GITLAB_KEYS = {"gitlab_url", "gitlab_token", "bot_username", "gitlab_ssl_verify"}
+
+
 @app.post("/admin/api/save-config")
 async def admin_save_config(request: Request):
+    """Persist config to the store (data volume) and apply it live.
+
+    Env-owned keys are refused — real environment variables always win, so a
+    store write there would be a silent no-op on restart."""
     _check_admin()
     data = await request.json()
+    from gitbot import config as cfg
 
-    # Build env file content from provided fields
-    lines = []
-    field_map = {
-        "gitlab_url": "GITBOT_GITLAB_URL",
-        "gitlab_token": "GITBOT_GITLAB_TOKEN",
-        "bot_username": "GITBOT_BOT_USERNAME",
-        "gitlab_ssl_verify": "GITBOT_GITLAB_SSL_VERIFY",
-        "webhook_secret": "GITBOT_WEBHOOK_SECRET",
-        "anthropic_api_key": "GITBOT_ANTHROPIC_API_KEY",
-        "admin_enabled": "GITBOT_ADMIN_ENABLED",
-    }
-    for field, env_var in field_map.items():
-        if field in data and data[field] != "":
-            lines.append(f"{env_var}={data[field]}")
-
-    env_content = "\n".join(lines) + "\n"
-    Path(".env").write_text(env_content)
-
-    return {"status": "ok", "message": "Config saved. Restart the container to apply changes."}
+    updates = {k: v for k, v in data.items() if k in _SAVEABLE_KEYS and v != ""}
+    applied, locked = cfg.save_config(updates)
+    if _GITLAB_KEYS & set(applied):
+        from gitbot import gitlab_client as glc
+        glc._gl = None  # drop cached client so the new connection details apply
+    msg = []
+    if applied:
+        msg.append(f"Saved & applied live: {', '.join(sorted(applied))}.")
+    if locked:
+        msg.append(f"Skipped (owned by environment): {', '.join(sorted(locked))} — "
+                   "unset the GITBOT_* env var to manage here.")
+    if not msg:
+        msg.append("Nothing to save.")
+    return {"status": "ok", "applied": applied, "locked": locked, "message": " ".join(msg)}
 
 
 @app.post("/admin/api/threshold")
@@ -235,7 +272,11 @@ async def admin_set_threshold(request: Request):
     if not 1 <= val <= 10:
         raise HTTPException(status_code=400,
                             detail="question_threshold must be 1-10")
-    settings.question_threshold = val
+    from gitbot import config as cfg
+    applied, locked = cfg.save_config({"question_threshold": val})
+    if locked:
+        raise HTTPException(status_code=400,
+                            detail="question_threshold is set via environment")
     log.info("Question threshold set to %d via admin panel", val)
     return {"status": "ok", "question_threshold": val}
 
@@ -261,7 +302,11 @@ async def admin_set_workflow_model(request: Request):
         raise HTTPException(
             status_code=400,
             detail="model must be auto, haiku, sonnet, opus, or a claude-* id")
-    setattr(settings, f"model_{workflow}", model)
+    from gitbot import config as cfg
+    applied, locked = cfg.save_config({f"model_{workflow}": model})
+    if locked:
+        raise HTTPException(status_code=400,
+                            detail=f"model_{workflow} is set via environment")
     log.info("Workflow model set via admin panel: %s -> %s", workflow, model)
     return {"status": "ok", "workflow": workflow, "model": model}
 
@@ -648,13 +693,21 @@ async def admin_onboard_provision(request: Request):
             state.record_managed_hook(gr["group_id"], "", gr["hook_id"], our_url)
 
     # Optionally switch the running GitBot to act as the new identity now.
+    # Persisted to the config store when env doesn't own the keys; env-owned
+    # keys apply live but revert on restart (reported via identity_persisted).
     if apply_identity:
+        from gitbot import config as cfg
         from gitbot import gitlab_client as glc
+        applied, locked = cfg.save_config(
+            {"gitlab_token": r["token"], "bot_username": r["username"]})
         settings.gitlab_token = r["token"]
         settings.bot_username = r["username"]
         glc._gl = None  # drop cached client so the new token is used immediately
         r["applied"] = True
-        log.info("GitBot identity switched to @%s (id %s) via onboarding",
-                 r["username"], r["user_id"])
+        r["identity_persisted"] = not locked
+        r["identity_locked_keys"] = locked
+        log.info("GitBot identity switched to @%s (id %s) via onboarding%s",
+                 r["username"], r["user_id"],
+                 "" if not locked else f" (env-owned, not persisted: {locked})")
     r["status"] = "ok"
     return r

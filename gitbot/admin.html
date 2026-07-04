@@ -109,19 +109,22 @@
     <span id="testResult" style="margin-left:0.5rem;font-size:0.8rem"></span>
   </div>
 
-  <!-- Config form (hidden) -->
+  <!-- Config form (hidden). Fields owned by GITBOT_* env vars are locked:
+       env wins over the store, so editing them here would be a no-op. -->
   <div id="setupForm">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem">
-      <label>GitLab URL<br><input id="cfgGitlabUrl" placeholder="https://gitlab.example.com"></label>
-      <label>GitLab Token<br><input id="cfgGitlabToken" type="password" placeholder="glpat-xxx"></label>
-      <label>Bot Username<br><input id="cfgBotUsername" placeholder="gitbot"></label>
-      <label>Anthropic Key<br><input id="cfgAnthropicKey" type="password" placeholder="sk-ant-..."></label>
+      <label>GitLab URL<br><input id="cfgGitlabUrl" data-key="gitlab_url" placeholder="https://gitlab.example.com"></label>
+      <label>GitLab Token<br><input id="cfgGitlabToken" data-key="gitlab_token" type="password" placeholder="glpat-xxx"></label>
+      <label>Bot Username<br><input id="cfgBotUsername" data-key="bot_username" placeholder="gitbot"></label>
+      <label>Anthropic Key<br><input id="cfgAnthropicKey" data-key="anthropic_api_key" type="password" placeholder="sk-ant-..."></label>
+      <label>Webhook Secret<br><input id="cfgWebhookSecret" data-key="webhook_secret" type="password" placeholder="shared secret for /webhook"></label>
+      <label>Admin Password<br><input id="cfgAdminPassword" data-key="admin_password" type="password" placeholder="protects this panel (Basic auth)"></label>
       <label>SSL Verify<br>
-        <select id="cfgSslVerify"><option value="true">Yes</option><option value="false">No (self-signed)</option></select>
+        <select id="cfgSslVerify" data-key="gitlab_ssl_verify"><option value="true">Yes</option><option value="false">No (self-signed)</option></select>
       </label>
     </div>
     <div style="margin-top:0.75rem">
-      <button class="btn primary" onclick="saveConfig()">Save &amp; Restart Required</button>
+      <button class="btn primary" onclick="saveConfig()">Save (applies live)</button>
       <span id="saveResult" style="margin-left:0.5rem;font-size:0.8rem"></span>
     </div>
   </div>
@@ -219,6 +222,26 @@ async function fetchStats() {
     const form = document.getElementById('setupForm');
     if (d.config.setup_needed) { banner.classList.remove('hidden'); form.classList.remove('hidden'); }
     else { banner.classList.add('hidden'); }
+
+    // Lock config fields owned by environment variables (env wins over the
+    // store, so a UI edit there would be a silent no-op).
+    const src = (d.config.sources) || {};
+    document.querySelectorAll('#setupForm [data-key]').forEach(el => {
+      const locked = src[el.dataset.key] === 'env';
+      el.disabled = locked;
+      el.title = locked ? 'Set via GITBOT_* environment variable — unset it to manage here' : '';
+      const lab = el.closest('label');
+      if (lab) {
+        let tag = lab.querySelector('.envtag');
+        if (locked && !tag) {
+          tag = document.createElement('span');
+          tag.className = 'envtag'; tag.textContent = ' (env)';
+          tag.style.cssText = 'color:#9e6a03;font-size:0.65rem;font-weight:600';
+          lab.insertBefore(tag, lab.querySelector('br'));
+        }
+        if (!locked && tag) tag.remove();
+      }
+    });
 
     const active = document.activeElement;
     if (active && active.closest && active.closest('#configRow')) return;
@@ -412,14 +435,12 @@ function toggleSetup() {
 async function saveConfig() {
   const el = document.getElementById('saveResult');
   el.textContent = 'Saving...';
-  const data = {
-    gitlab_url: document.getElementById('cfgGitlabUrl').value,
-    gitlab_token: document.getElementById('cfgGitlabToken').value,
-    bot_username: document.getElementById('cfgBotUsername').value || 'gitbot',
-    anthropic_api_key: document.getElementById('cfgAnthropicKey').value,
-    gitlab_ssl_verify: document.getElementById('cfgSslVerify').value,
-  };
-  Object.keys(data).forEach(k => { if (!data[k]) delete data[k]; });
+  // Send only edited, unlocked fields; the server persists to the store and
+  // applies live (env-owned keys are refused server-side too).
+  const data = {};
+  document.querySelectorAll('#setupForm [data-key]').forEach(inp => {
+    if (!inp.disabled && inp.value) data[inp.dataset.key] = inp.value;
+  });
   try {
     const r = await fetch(`${API}/save-config`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
     const d = await r.json();
@@ -595,7 +616,7 @@ async function obProvision() {
         <div style="font-size:0.8rem;color:#e6edf3;margin-bottom:0.3rem">Service account <strong>@${d.username}</strong> (id ${d.user_id})${d.adopted?' (adopted existing)':''}</div>
         <div style="font-size:0.75rem;color:#f0883e;margin-bottom:0.3rem">Day-to-day token (shown once — copy it now, expires ${d.expires_at||'?'}):</div>
         <input readonly value="${d.token}" onclick="this.select()" style="width:100%;background:#161b22;border:1px solid #30363d;color:#3fb950;padding:0.3rem;border-radius:4px;font-family:monospace;font-size:0.75rem">
-        <div style="font-size:0.7rem;color:#8b949e;margin-top:0.3rem">${d.applied?'GitBot is now using this token live. To persist across restarts, set GITBOT_GITLAB_TOKEN + GITBOT_BOT_USERNAME in your deployment.':'Set GITBOT_GITLAB_TOKEN + GITBOT_BOT_USERNAME to this to run GitBot as this account.'}</div>
+        <div style="font-size:0.7rem;color:#8b949e;margin-top:0.3rem">${d.applied ? (d.identity_persisted ? 'GitBot now uses this identity — saved to the config store, survives restarts.' : `GitBot uses this identity live, but ${(d.identity_locked_keys||[]).join('+')} is set via environment — update your deployment env or the swap reverts on restart.`) : 'Set GITBOT_GITLAB_TOKEN + GITBOT_BOT_USERNAME to this to run GitBot as this account.'}</div>
         ${rows}
       </div>`;
     fetchStats();
