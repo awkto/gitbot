@@ -88,6 +88,12 @@ class Situation:
     # classifier — drives auto model selection.
     task_complexity: int | None = None
 
+    # Claude Agent SDK session id (github/gitbot#25). Captured from the SDK
+    # message stream as soon as a session starts and persisted into the work
+    # item; resume paths load it back so the SDK continues the SAME session
+    # (full conversation state) instead of rebuilding from a snapshot.
+    sdk_session_id: str = ""
+
     # Pending work from state DB — always available (cheap local lookup)
     pending_question: dict | None = None
 
@@ -183,6 +189,10 @@ def build_minimal(event_type: str, payload: dict) -> Situation:
         sit.pending_question = state.get_pending_question(
             sit.project_id, sit.target_type, sit.target_iid
         )
+        if sit.pending_question:
+            # The parked session's SDK id — answering resumes that session.
+            sit.sdk_session_id = (sit.pending_question.get("context") or {}).get(
+                "sdk_session_id", "")
 
     return sit
 
