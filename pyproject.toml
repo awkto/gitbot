@@ -27,3 +27,5 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Only tests/ — scripts/ has manual test_* utilities pytest must not collect.
+testpaths = ["tests"]
