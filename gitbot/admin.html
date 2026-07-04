@@ -275,7 +275,7 @@ async function fetchStats() {
 
     document.getElementById('statsGrid').innerHTML = `
       <div class="card"><div class="label">Uptime</div><div class="value">${dur(d.uptime_seconds)}</div></div>
-      <div class="card"><div class="label">Webhooks</div><div class="value">${d.webhooks_received}</div><div class="sub">${d.webhooks_skipped} skipped</div></div>
+      <div class="card"><div class="label">Webhooks</div><div class="value">${d.webhooks_received}</div><div class="sub">${d.webhooks_skipped} skipped${d.webhooks_rejected ? ` · <span class="badge error" title="Deliveries rejected for a bad/missing secret — a GitLab hook is misconfigured (updating a hook URL without re-sending its token clears the secret). Events are being lost!">${d.webhooks_rejected} rejected (bad secret)</span>` : ''}</div></div>
       <div class="card"><div class="label">Workflows</div><div class="value">${d.workflows_completed + d.workflows_failed}</div><div class="sub">${d.workflows_completed} ok, ${d.workflows_failed} failed, ${d.active_workflows} active</div></div>
       <div class="card"><div class="label">Escalations</div><div class="value">${d.total_escalations}</div></div>`;
   } catch(e) {}

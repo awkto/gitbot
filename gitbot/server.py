@@ -139,6 +139,12 @@ async def webhook(
 ):
     if settings.webhook_secret:
         if x_gitlab_token != settings.webhook_secret:
+            # Count it: a nonzero rejected counter is the unambiguous signal
+            # that a GitLab hook has a wrong/cleared secret and events are
+            # being lost (surfaced as a red badge in the admin panel).
+            tracker.webhook_rejected()
+            log.warning("Webhook rejected: bad or missing secret (event: %s)",
+                        x_gitlab_event)
             raise HTTPException(status_code=403, detail="Invalid webhook token")
 
     payload = await request.json()

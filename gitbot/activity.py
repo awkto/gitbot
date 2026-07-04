@@ -117,6 +117,11 @@ class ActivityTracker:
         self._stats = {
             "webhooks_received": 0,
             "webhooks_skipped": 0,
+            # Deliveries rejected for a bad/missing secret. Nonzero means a
+            # GitLab hook is misconfigured (e.g. a hook URL was updated
+            # without re-sending its token, which clears it) — events are
+            # being LOST. The admin panel surfaces this as a red badge.
+            "webhooks_rejected": 0,
             "workflows_completed": 0,
             "workflows_failed": 0,
             "total_tool_calls": 0,
@@ -138,6 +143,10 @@ class ActivityTracker:
     def webhook_skipped(self):
         with self._lock:
             self._stats["webhooks_skipped"] += 1
+
+    def webhook_rejected(self):
+        with self._lock:
+            self._stats["webhooks_rejected"] += 1
 
     def start_workflow(self, workflow_id: str, trigger: str, target: str,
                        project: str, target_url: str = "") -> Workflow:
