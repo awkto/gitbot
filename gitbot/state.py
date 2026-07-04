@@ -123,20 +123,26 @@ def set_pending_response(
 
     discussion_id is the thread the question lives in — an untagged reply
     in that thread counts as the answer (stored in the context JSON).
+
+    New context keys MERGE into the stored context — replacing it wholesale
+    would drop the original event context (used to replay interrupted
+    callouts) and the sdk_session_id (used for true resume, #25).
     """
     db = _get_db()
     if discussion_id:
         context = (context or {}) | {"discussion_id": discussion_id}
-    updates = {"status": Status.PENDING_RESPONSE, "question": question,
-               "asked_user": asked_user, "updated_at": time.time()}
+    merged = None
     if context is not None:
-        updates["context"] = json.dumps(context)
+        row = db.execute(
+            "SELECT context FROM work_items WHERE id=?", (work_id,)).fetchone()
+        existing = json.loads(row["context"]) if row else {}
+        merged = json.dumps(existing | context)
     db.execute(
         """UPDATE work_items
            SET status=?, question=?, asked_user=?, context=COALESCE(?, context), updated_at=?
            WHERE id=?""",
-        (updates["status"], question, asked_user,
-         updates.get("context"), updates["updated_at"], work_id),
+        (Status.PENDING_RESPONSE, question, asked_user,
+         merged, time.time(), work_id),
     )
     db.commit()
 

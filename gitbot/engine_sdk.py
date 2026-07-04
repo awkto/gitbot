@@ -79,6 +79,13 @@ def _parse_classification(raw: str, valid: set[str], default: str) -> tuple[str,
     return word, complexity
 
 
+def _data_dir() -> str:
+    # Absolute: this path is consumed by SDK subprocesses whose cwd is a
+    # per-task workspace — a relative path would resolve somewhere else for
+    # every workflow and break session resume (#25).
+    return os.path.abspath(os.path.dirname(settings.state_db_path) or "data")
+
+
 def _setup_subprocess_env() -> None:
     """Env for the SDK subprocess (inherited by Bash tools): Anthropic auth
     and glab CLI auth against the configured GitLab instance."""
@@ -88,6 +95,20 @@ def _setup_subprocess_env() -> None:
         host = settings.gitlab_url.split("://", 1)[-1].rstrip("/")
         os.environ.setdefault("GITLAB_HOST", host)
         os.environ.setdefault("GITLAB_TOKEN", settings.gitlab_token)
+    # SDK session transcripts must live in the data volume so resume
+    # (github/gitbot#25) survives container recreation.
+    cfg = os.path.join(_data_dir(), "claude")
+    os.makedirs(cfg, exist_ok=True)
+    os.environ.setdefault("CLAUDE_CONFIG_DIR", cfg)
+
+
+def _workspace_dir(kind: str, sit) -> str:
+    """Deterministic per-target workspace (github/gitbot#25). SDK sessions are
+    stored per-cwd, so resuming a session requires running from the SAME
+    directory — a random tempdir would orphan the transcript. Living in the
+    data volume also preserves partial work (clones, scratch) across restarts."""
+    return os.path.join(_data_dir(), "workspaces",
+                        f"{kind}-{sit.project_id}-{sit.target_iid}")
 
 
 MENTION_SYSTEM = """\
@@ -398,15 +419,30 @@ class Progress:
             self._task.cancel()
 
 
-async def _drive(query_iter, progress: Progress, wf_id: str, label: str) -> str:
+async def _drive(query_iter, progress: Progress, wf_id: str, label: str,
+                 sit=None) -> str:
     """Consume the SDK message stream: feed tool calls and narration to the
-    activity tracker + heartbeat as they happen, return the final text."""
+    activity tracker + heartbeat as they happen, return the final text.
+
+    When `sit` is given, the SDK session id is captured from the first message
+    that carries one and persisted into the work item immediately — so even a
+    crashed session leaves behind the id a resume needs (#25)."""
     from claude_agent_sdk import AssistantMessage, ResultMessage
 
     from gitbot.activity import tracker
 
     final_text = ""
     async for message in query_iter:
+        sid = getattr(message, "session_id", None)
+        if sid and sit is not None and sit.sdk_session_id != sid:
+            sit.sdk_session_id = sid
+            work_id = getattr(sit, "_work_id", None)
+            if work_id:
+                try:
+                    from gitbot import state
+                    state.update_context(work_id, {"sdk_session_id": sid})
+                except Exception:  # pragma: no cover - persistence best-effort
+                    log.warning("Could not persist sdk_session_id", exc_info=True)
         if isinstance(message, AssistantMessage):
             for block in getattr(message, "content", []):
                 name = getattr(block, "name", None)
@@ -431,6 +467,28 @@ async def _drive(query_iter, progress: Progress, wf_id: str, label: str) -> str:
                      label, getattr(message, "subtype", "?"),
                      getattr(message, "total_cost_usd", None))
     return final_text
+
+
+def _resume_id(sit) -> str | None:
+    """Session id to resume, when this run continues earlier work (#25)."""
+    return sit.sdk_session_id or None if sit.is_replay else None
+
+
+async def _drive_resumable(make_query, options, progress, wf_id: str,
+                           label: str, sit) -> str:
+    """_drive with graceful resume fallback: if resuming a prior SDK session
+    fails (transcript gone — e.g. pre-#25 run, wiped volume), retry once as a
+    fresh session. The snapshot/replay prompt covers the fresh path."""
+    try:
+        return await _drive(make_query(), progress, wf_id, label, sit)
+    except Exception:
+        if not getattr(options, "resume", None):
+            raise
+        log.warning("SDK resume of session %s failed — retrying fresh",
+                    options.resume, exc_info=True)
+        options.resume = None
+        sit.sdk_session_id = ""
+        return await _drive(make_query(), progress, wf_id, label, sit)
 
 
 async def run_mention(sit: Situation, wf_id: str = "",
@@ -619,8 +677,49 @@ Rules:
 """
 
 
-def _clone_repo(project_id: int, workdir: str) -> tuple[str, str]:
-    """Clone the project into workdir/repo. Returns (repo_path, default_branch)."""
+# MR-update mode (github/gitbot#26): a task/steer comment ON a merge request
+# means "change THIS MR" — work on its existing source branch and push; never
+# open a second MR.
+IMPLEMENT_MR_SYSTEM = """\
+You are GitBot, an AI developer inside a GitLab instance. {requester} asked
+you, in a comment on merge request !{target_iid} ("{target_title}") in
+project "{project_name}" (ID: {project_id}), to make changes to that MR.
+
+A working clone of the repository is in your current directory, already
+checked out on the MR's source branch `{branch_name}`.
+
+1. Read the request and the MR context, explore the repo.
+2. Make the changes with the file tools. Match the existing code style.
+3. You may run existing code, tests or linters for a quick sanity check, but
+   this container is NOT a devbox: do not install packages, run docker, or
+   start services. The MR's CI pipeline is what builds and tests your push.
+4. Commit with a clear message and push with plain `git push` — the branch's
+   upstream is already set.
+
+Rules:
+- Stay on branch `{branch_name}`: do NOT create a new branch and do NOT open
+  a new merge request — your pushed commits update MR !{target_iid} directly.
+- The git remote is already authenticated — plain `git push` works.
+- Do NOT merge or close the MR.
+- Do NOT use post_comment for your final summary — your final text response is
+  posted to the MR automatically.
+- If the request turns out to require NO changes to repository files, do NOT
+  invent changes just to push something: do any non-file actions with your
+  GitLab tools, then start your final response with the word NO_CHANGES
+  followed by your report.
+- If the request is impossible, push nothing and explain why in your final
+  response, starting it with the word BLOCKED.
+{queue_rules}
+{asking_rules}
+"""
+
+
+def _clone_repo(project_id: int, workdir: str,
+                branch: str | None = None) -> tuple[str, str, str]:
+    """Clone the project into workdir/repo, optionally checked out on `branch`
+    (MR-update mode clones the MR's source branch directly).
+
+    Returns (repo_path, default_branch, head_sha)."""
     import subprocess
 
     from gitbot import gitlab_client as glc
@@ -634,20 +733,25 @@ def _clone_repo(project_id: int, workdir: str) -> tuple[str, str]:
     url = f"https://oauth2:{settings.gitlab_token}@{base}/{path_ns}.git"
 
     repo_path = os.path.join(workdir, "repo")
-    subprocess.run(
-        ["git", "clone", "--depth", "50", url, repo_path],
-        check=True, capture_output=True, timeout=120,
-    )
+    cmd = ["git", "clone", "--depth", "50"]
+    if branch:
+        cmd += ["--branch", branch]
+    subprocess.run(cmd + [url, repo_path],
+                   check=True, capture_output=True, timeout=120)
     bot = settings.bot_username
     for k, v in (("user.name", "GitBot"), ("user.email", f"{bot}@{base}")):
         subprocess.run(["git", "-C", repo_path, "config", k, v],
                        check=True, capture_output=True)
-    return repo_path, default_branch
+    head = subprocess.run(["git", "-C", repo_path, "rev-parse", "HEAD"],
+                          check=True, capture_output=True, timeout=30)
+    return repo_path, default_branch, head.stdout.decode().strip()
 
 
 def _finalize_no_shell(repo_path: str, branch_name: str, sit: Situation,
-                       default_branch: str) -> str | None:
-    """local_exec=none: branch, commit, push and open the MR on the agent's behalf.
+                       default_branch: str, mr_mode: bool = False) -> str | None:
+    """local_exec=none: commit, push (and for issues, branch + open the MR)
+    on the agent's behalf. In MR-update mode the clone is already on the MR's
+    source branch — just commit and push to it.
 
     Returns an error string, or None on success (including 'nothing to commit',
     which the verification gate will then report).
@@ -665,7 +769,15 @@ def _finalize_no_shell(repo_path: str, branch_name: str, sit: Situation,
                                 check=True, capture_output=True, timeout=30)
         if not status.stdout.strip():
             return None  # no changes — gate will fail with a clear reason
-        run("checkout", "-b", branch_name)
+        if mr_mode:
+            run("add", "-A")
+            run("commit", "-m", f"GitBot: {sit.target_title} (!{sit.target_iid})")
+            run("push")
+            return None
+        try:
+            run("checkout", "-b", branch_name)
+        except subprocess.CalledProcessError:
+            run("checkout", branch_name)  # resumed workspace: branch exists
         run("add", "-A")
         run("commit", "-m", f"GitBot: {sit.target_title} (#{sit.target_iid})")
         run("push", "-u", "origin", branch_name)
@@ -710,31 +822,128 @@ def _verify_implement(project_id: int, issue_iid: int, branch_name: str) -> tupl
             "commits": len(commits)}, ""
 
 
+def _refresh_repo(project_id: int, repo_path: str) -> str:
+    """Reused workspace (resume, #25): fetch the latest refs and return the
+    project's default branch. Local partial work is left untouched — it IS
+    the progress the resumed session continues from."""
+    import subprocess
+
+    from gitbot import gitlab_client as glc
+
+    subprocess.run(["git", "-C", repo_path, "fetch", "origin"],
+                   check=True, capture_output=True, timeout=120)
+    project = glc.get_client().projects.get(project_id)
+    return project.default_branch or "main"
+
+
+def _branch_head(project_id: int, branch: str) -> str:
+    """Remote head SHA of a branch (the MR-update gate's baseline)."""
+    from gitbot import gitlab_client as glc
+
+    return glc.get_client().projects.get(project_id).branches.get(branch).commit["id"]
+
+
+def _verify_mr_update(project_id: int, branch: str, pre_sha: str) -> tuple[dict | None, str]:
+    """Finish gate for MR-update mode: the source branch must have new commits."""
+    from gitbot import gitlab_client as glc
+
+    gl = glc.get_client()
+    project = gl.projects.get(project_id)
+    try:
+        head = project.branches.get(branch).commit["id"]
+    except Exception as e:
+        return None, f"could not read branch `{branch}`: {str(e)[:120]}"
+    if head == pre_sha:
+        return None, f"no new commits were pushed to `{branch}`"
+    try:
+        cmp = project.repository_compare(pre_sha, head)
+        n = len(cmp.get("commits", [])) or 1
+    except Exception:
+        n = 1
+    return {"commits": n, "head": head[:8]}, ""
+
+
 async def run_implement(sit: Situation, wf_id: str = "",
                         placeholder_id: int | None = None) -> tuple[str, bool]:
     """Run the implement workflow: clone → SDK loop → verify.
+
+    Issue target: new branch + merge request (the classic path). MergeRequest
+    target (a task/steer comment on an MR, #26): work on the MR's existing
+    source branch and push — the gate checks for new commits, not a new MR.
+
+    The workspace is a deterministic per-target dir in the data volume (#25):
+    resumed runs reuse it (same cwd → the SDK finds the prior session's
+    transcript; the clone with partial work is still there). It is removed
+    when the task finishes; it survives parking (needs_input/waiting) and
+    process crashes so the resume can continue in place.
 
     Returns (markdown_summary, success). The summary is posted by the caller;
     success=False means the finish gate failed or the agent reported BLOCKED.
     """
     import shutil
-    import tempfile
 
-    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+    workdir = _workspace_dir("impl", sit)
+    reuse = bool(sit.is_replay and os.path.isdir(os.path.join(workdir, "repo")))
+    if not reuse:
+        shutil.rmtree(workdir, ignore_errors=True)
+        os.makedirs(workdir, exist_ok=True)
+    try:
+        text, ok = await _run_implement_in(
+            sit, wf_id, placeholder_id, workdir, reuse)
+    except BaseException:
+        # In-process failure: brain marks the item failed (no auto-resume
+        # follows), so don't leak the workspace. A hard process crash skips
+        # this handler — the surviving workspace + persisted session id are
+        # exactly what gives the crash-resume a true resume.
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+    if ok in ("needs_input", "waiting"):
+        return text, ok  # parked: keep workspace + session for the resume
+    shutil.rmtree(workdir, ignore_errors=True)
+    return text, ok
+
+
+async def _run_implement_in(sit: Situation, wf_id: str,
+                            placeholder_id: int | None,
+                            workdir: str, reuse: bool) -> tuple[str, bool]:
+    from claude_agent_sdk import ClaudeAgentOptions, query
 
     _setup_subprocess_env()
 
     progress = Progress(sit, placeholder_id)
-    branch_name = f"gitbot/issue-{sit.target_iid}"
-    workdir = tempfile.mkdtemp(prefix=f"gitbot-impl-{sit.project_id}-{sit.target_iid}-")
+    mr_mode = sit.target_type == "MergeRequest"
+    if mr_mode:
+        from gitbot import gitlab_client as glc
+        try:
+            mr_details = await asyncio.to_thread(
+                glc.get_mr_details, sit.project_id, sit.target_iid)
+        except Exception as e:
+            return (f":x: **Could not read MR !{sit.target_iid}**: "
+                    f"`{str(e)[:200]}`"), False
+        if mr_details["state"] != "opened":
+            return (f":no_entry: **MR !{sit.target_iid} is {mr_details['state']}** — "
+                    "GitBot can only push changes to an open merge request."), False
+        branch_name = mr_details["source_branch"]
+    else:
+        branch_name = f"gitbot/issue-{sit.target_iid}"
 
     try:
-        repo_path, default_branch = await asyncio.to_thread(
-            _clone_repo, sit.project_id, workdir
-        )
+        if reuse:
+            repo_path = os.path.join(workdir, "repo")
+            default_branch = await asyncio.to_thread(
+                _refresh_repo, sit.project_id, repo_path)
+        else:
+            repo_path, default_branch, _ = await asyncio.to_thread(
+                _clone_repo, sit.project_id, workdir,
+                branch_name if mr_mode else None
+            )
+        # MR gate baseline = the branch's REMOTE head as of session start.
+        # (Known edge: if an interrupted run already pushed everything and the
+        # resume has nothing left to push, the gate reports no new commits.)
+        pre_sha = (await asyncio.to_thread(
+            _branch_head, sit.project_id, branch_name) if mr_mode else "")
     except Exception as e:
         log.error("Clone failed for project %s: %s", sit.project_id, e)
-        shutil.rmtree(workdir, ignore_errors=True)
         return (f":x: **Could not clone the repository**: `{str(e)[:200]}`\n\n"
                 "Check that the repo is initialized and the bot has access."), False
 
@@ -743,15 +952,16 @@ async def run_implement(sit: Situation, wf_id: str = "",
     allowed = ["Read", "Write", "Edit", "Glob", "Grep",
                "mcp__gitlab__*", "WebSearch", "WebFetch"]
     hooks = None
-    system_prompt = IMPLEMENT_SYSTEM
+    system_prompt = IMPLEMENT_MR_SYSTEM if mr_mode else IMPLEMENT_SYSTEM
     if mode == "none":
         system_prompt = system_prompt.replace(
             "2. Create a branch named exactly", "2. (handled by the harness)",
         )
         system_prompt += (
             "\nNOTE: You have NO shell in this mode. Just edit the files; the "
-            "harness will branch, commit, push and open the merge request for you. "
-            "Do not call create_merge_request yourself."
+            "harness will commit and push for you"
+            + ("." if mr_mode else " and open the merge request. "
+               "Do not call create_merge_request yourself.")
         )
     else:
         allowed.insert(5, "Bash")
@@ -782,52 +992,91 @@ async def run_implement(sit: Situation, wf_id: str = "",
         setting_sources=[],
         cwd=repo_path,
         hooks=hooks,
+        resume=_resume_id(sit),  # true SDK resume when continuing work (#25)
     )
 
-    prompt = (
-        f"Issue #{sit.target_iid}: {sit.target_title}\n\n"
-        f"{sit.target_description or '(no description)'}\n\n"
-        f"The repository default branch is `{default_branch}`."
-    )
-    if sit.comment_body:
-        prompt += f"\n\nLatest comment from @{sit.actor}:\n{sit.comment_body}"
-    if sit.is_replay:
-        prompt += (
-            f"\n\nIMPORTANT — RESUMED TASK: this work was interrupted and partial "
-            f"progress may exist. Check whether branch `{branch_name}` already exists "
-            f"(locally after fetch, or on the remote) and whether an MR is already "
-            f"open; continue from the existing state instead of starting over."
+    if mr_mode:
+        prompt = (
+            f"Merge request !{sit.target_iid}: {sit.target_title}\n\n"
+            f"{sit.target_description or '(no description)'}\n\n"
+            f"Branch: `{branch_name}` → `{mr_details['target_branch']}`."
         )
+        if sit.comment_body:
+            prompt += f"\n\nThe request, from @{sit.actor}:\n{sit.comment_body}"
+        if sit.is_replay:
+            prompt += (
+                "\n\nIMPORTANT — RESUMED TASK: earlier work on this request may "
+                "already be committed or pushed on this branch. Check `git log` "
+                "and `git status` and continue from the existing state instead "
+                "of redoing it."
+            )
+    else:
+        prompt = (
+            f"Issue #{sit.target_iid}: {sit.target_title}\n\n"
+            f"{sit.target_description or '(no description)'}\n\n"
+            f"The repository default branch is `{default_branch}`."
+        )
+        if sit.comment_body:
+            prompt += f"\n\nLatest comment from @{sit.actor}:\n{sit.comment_body}"
+        if sit.is_replay:
+            prompt += (
+                f"\n\nIMPORTANT — RESUMED TASK: this work was interrupted and partial "
+                f"progress may exist. Check whether branch `{branch_name}` already exists "
+                f"(locally after fetch, or on the remote) and whether an MR is already "
+                f"open; continue from the existing state instead of starting over."
+            )
 
-    log.info("SDK engine: implement workflow start (Issue #%s, branch=%s, resumed=%s, model=%s, complexity=%s)",
-             sit.target_iid, branch_name, sit.is_replay,
-             options.model, sit.task_complexity)
+    log.info("SDK engine: implement workflow start (%s %s%s, branch=%s, resumed=%s, "
+             "resume_session=%s, model=%s, complexity=%s)",
+             "MR" if mr_mode else "Issue",
+             "!" if mr_mode else "#", sit.target_iid, branch_name, sit.is_replay,
+             options.resume or "-", options.model, sit.task_complexity)
 
     final_text = ""
     progress.start()
     try:
-        final_text = await _drive(query(prompt=prompt, options=options),
-                                  progress, wf_id, "implement")
+        final_text = await _drive_resumable(
+            lambda: query(prompt=prompt, options=options),
+            options, progress, wf_id, "implement", sit)
 
         # local_exec=none: the agent only edited files — branch/commit/push/MR
         # are the harness's job.
         if (mode == "none"
                 and not final_text.strip().startswith(("BLOCKED", "NO_CHANGES"))):
             err = await asyncio.to_thread(
-                _finalize_no_shell, repo_path, branch_name, sit, default_branch
+                _finalize_no_shell, repo_path, branch_name, sit, default_branch,
+                mr_mode
             )
             if err:
                 return (f":warning: **GitBot edited files but publishing failed**: "
                         f"{err}\n\nAgent's report:\n\n{final_text}"), False
     finally:
         progress.stop()
-        shutil.rmtree(workdir, ignore_errors=True)
 
     if final_text.strip().startswith("BLOCKED"):
-        return (f":no_entry: **GitBot could not implement this issue.**\n\n"
+        return (f":no_entry: **GitBot could not implement this "
+                f"{'change' if mr_mode else 'issue'}.**\n\n"
                 f"{final_text.strip()[7:].strip()}"), False
     if _is_needs_input(final_text):
         return _needs_input_result(sit, final_text)
+
+    if mr_mode:
+        # Finish gate for MR-update mode: new commits on the source branch.
+        upd_info, reason = await asyncio.to_thread(
+            _verify_mr_update, sit.project_id, branch_name, pre_sha)
+        if final_text.strip().startswith("NO_CHANGES"):
+            body = final_text.strip()[len("NO_CHANGES"):].lstrip(" :\n")
+            if upd_info is None:  # really pushed nothing — accept
+                return (f":white_check_mark: **Done — no code changes were "
+                        f"needed.**\n\n{body}"), True
+            final_text = body
+        if upd_info is None:
+            log.warning("MR-update gate failed for MR !%s: %s", sit.target_iid, reason)
+            return (f":warning: **GitBot finished but verification failed**: {reason}.\n\n"
+                    f"Agent's report:\n\n{final_text}"), False
+        return (f":white_check_mark: **Pushed {upd_info['commits']} "
+                f"commit{'s' if upd_info['commits'] != 1 else ''} to this MR** "
+                f"(`{branch_name}` @ {upd_info['head']})\n\n{final_text}"), True
 
     if final_text.strip().startswith("NO_CHANGES"):
         # The issue needed no file changes — accept without the MR gate, but
@@ -921,7 +1170,8 @@ def _resume_snapshot(sit: Situation) -> str:
         project = gl.projects.get(sit.project_id)
         ns = project.namespace["full_path"]
         group = gl.groups.get(ns)
-        projects = group.projects.list(order_by="created_at", sort="desc", per_page=8)
+        projects = group.projects.list(order_by="created_at", sort="desc",
+                                       per_page=8, get_all=False)
         lines = [f"- {p.path_with_namespace} (id={p.id}, created {p.created_at[:16]})"
                  for p in projects if "deletion_scheduled" not in p.path]
         if lines:
@@ -952,15 +1202,18 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
     There is no structural gate (the task shape is arbitrary) — success is
     the loop completing with a non-BLOCKED report. The prompt demands
     per-item verification and an honest final checklist.
-    """
-    import tempfile
 
-    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage, query
+    The scratch workspace is a deterministic per-target dir (#25) so a parked
+    or crashed session can be truly resumed (SDK sessions are stored per-cwd);
+    it is removed when the task finishes and kept while parked.
+    """
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
 
     _setup_subprocess_env()
 
     progress = Progress(sit, placeholder_id)
-    workdir = tempfile.mkdtemp(prefix=f"gitbot-orch-{sit.project_id}-{sit.target_iid}-")
+    workdir = _workspace_dir("orch", sit)
+    os.makedirs(workdir, exist_ok=True)
 
     allowed = ["Read", "Write", "Edit", "Glob", "Grep",
                "mcp__gitlab__*", "WebSearch", "WebFetch"]
@@ -993,6 +1246,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
         setting_sources=[],
         cwd=workdir,
         hooks=hooks,
+        resume=_resume_id(sit),  # true SDK resume when continuing work (#25)
     )
 
     prompt = (
@@ -1014,31 +1268,40 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             "--- Original task below ---\n\n" + prompt
         )
 
-    log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d, resumed=%s, model=%s, complexity=%s)",
+    log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d, resumed=%s, "
+             "resume_session=%s, model=%s, complexity=%s)",
              sit.target_iid, ORCHESTRATE_MAX_TURNS, sit.is_replay,
-             options.model, sit.task_complexity)
+             options.resume or "-", options.model, sit.task_complexity)
 
     progress.start()
     try:
-        final_text = await _drive(query(prompt=prompt, options=options),
-                                  progress, wf_id, "orchestrate")
+        final_text = await _drive_resumable(
+            lambda: query(prompt=prompt, options=options),
+            options, progress, wf_id, "orchestrate", sit)
     finally:
         progress.stop()
-        import shutil
-        shutil.rmtree(workdir, ignore_errors=True)
 
     if not final_text:
-        return ":warning: **GitBot produced no report** (loop ended without a result).", False
-    if final_text.strip().startswith("BLOCKED"):
-        return (f":no_entry: **GitBot could not complete this task.**\n\n"
-                f"{final_text.strip()[7:].strip()}"), False
-    if final_text.strip().startswith("WAITING"):
-        return (f":double_vertical_bar: **Task parked — waiting on something slow.**\n\n"
-                f"{final_text.strip()[7:].strip()}\n\n"
-                f"*GitBot will check back periodically and resume.*"), "waiting"
-    if _is_needs_input(final_text):
-        return _needs_input_result(sit, final_text)
-    return final_text, True
+        result = (":warning: **GitBot produced no report** "
+                  "(loop ended without a result).", False)
+    elif final_text.strip().startswith("BLOCKED"):
+        result = (f":no_entry: **GitBot could not complete this task.**\n\n"
+                  f"{final_text.strip()[7:].strip()}"), False
+    elif final_text.strip().startswith("WAITING"):
+        result = (f":double_vertical_bar: **Task parked — waiting on something slow.**\n\n"
+                  f"{final_text.strip()[7:].strip()}\n\n"
+                  f"*GitBot will check back periodically and resume.*"), "waiting"
+    elif _is_needs_input(final_text):
+        result = _needs_input_result(sit, final_text)
+    else:
+        result = final_text, True
+
+    if result[1] not in ("waiting", "needs_input"):
+        # Finished (either way): scratch is disposable. Parked keeps it so the
+        # resumed session finds its cwd (and any scratch files) intact.
+        import shutil
+        shutil.rmtree(workdir, ignore_errors=True)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1102,7 +1365,7 @@ def _checkout_mr_head(project_id: int, mr_iid: int, workdir: str) -> str:
     too via the refs/merge-requests/ ref). Returns the repo path."""
     import subprocess
 
-    repo_path, _ = _clone_repo(project_id, workdir)
+    repo_path, _, _ = _clone_repo(project_id, workdir)
     subprocess.run(
         ["git", "-C", repo_path, "fetch", "--depth", "50", "origin",
          f"refs/merge-requests/{mr_iid}/head"],

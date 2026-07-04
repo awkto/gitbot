@@ -456,6 +456,9 @@ async def _resume_item(
     # callout — replay it as the comment it was, NOT as task work on the
     # whole issue.
     ctx = (info.get("work_item") or {}).get("context") or {}
+    # The dead session's SDK id (persisted by _drive at session start, #25):
+    # the replay resumes that session instead of rebuilding from a snapshot.
+    sit.sdk_session_id = ctx.get("sdk_session_id", "")
     if ctx.get("event_type") == "Note Hook" and ctx.get("comment_body"):
         if target_type == "Issue":
             t = project.issues.get(target_iid)
