@@ -1,10 +1,29 @@
 """GitLab API helpers - post comments, fetch diffs, etc."""
 
+import re
+
 import gitlab
 
 from gitbot.config import settings
 
 _gl: gitlab.Gitlab | None = None
+
+# Anything shaped like a GitLab PAT / bot token. git subprocess errors embed
+# the authenticated clone URL (https://oauth2:<token>@host/...), so error text
+# posted to GitLab could leak the bot's own credential. Redact at the post
+# boundary — belt and suspenders over careful per-call handling.
+_TOKEN_RE = re.compile(r"glpat-[A-Za-z0-9_.\-]+|(?<=oauth2:)[A-Za-z0-9_.\-]+")
+
+
+def redact(text: str) -> str:
+    """Strip anything that looks like a bot token from user-facing text."""
+    if not text:
+        return text
+    out = _TOKEN_RE.sub("***", text)
+    tok = settings.gitlab_token
+    if tok and tok in out:
+        out = out.replace(tok, "***")
+    return out
 
 
 def get_client() -> gitlab.Gitlab:
@@ -19,7 +38,7 @@ def post_note_on_issue(project_id: int, issue_iid: int, body: str) -> int:
     gl = get_client()
     project = gl.projects.get(project_id)
     issue = project.issues.get(issue_iid)
-    note = issue.notes.create({"body": body})
+    note = issue.notes.create({"body": redact(body)})
     return note.get_id() or note.attributes.get("id", 0)
 
 
@@ -29,7 +48,7 @@ def update_note_on_issue(project_id: int, issue_iid: int, note_id: int, body: st
     project = gl.projects.get(project_id)
     issue = project.issues.get(issue_iid)
     note = issue.notes.get(note_id)
-    note.body = body
+    note.body = redact(body)
     note.save()
 
 
@@ -38,7 +57,7 @@ def post_note_on_mr(project_id: int, mr_iid: int, body: str) -> int:
     gl = get_client()
     project = gl.projects.get(project_id)
     mr = project.mergerequests.get(mr_iid)
-    note = mr.notes.create({"body": body})
+    note = mr.notes.create({"body": redact(body)})
     return note.get_id() or note.attributes.get("id", 0)
 
 
@@ -48,7 +67,7 @@ def update_note_on_mr(project_id: int, mr_iid: int, note_id: int, body: str) -> 
     project = gl.projects.get(project_id)
     mr = project.mergerequests.get(mr_iid)
     note = mr.notes.get(note_id)
-    note.body = body
+    note.body = redact(body)
     note.save()
 
 
@@ -86,7 +105,7 @@ def start_discussion(
         noteable = project.mergerequests.get(noteable_iid)
     else:
         noteable = project.issues.get(noteable_iid)
-    discussion = noteable.discussions.create({"body": body})
+    discussion = noteable.discussions.create({"body": redact(body)})
     first_note = discussion.attributes.get("notes", [{}])[0]
     return discussion.id, first_note.get("id", 0)
 
@@ -102,7 +121,7 @@ def reply_to_discussion(
     else:
         noteable = project.issues.get(noteable_iid)
     discussion = noteable.discussions.get(discussion_id)
-    note = discussion.notes.create({"body": body})
+    note = discussion.notes.create({"body": redact(body)})
     return note.id
 
 
@@ -284,6 +303,28 @@ def get_pending_todos() -> list[dict]:
     """Get all pending todos for the bot user."""
     gl = get_client()
     todos = gl.todos.list(state="pending", get_all=True)
+    return [
+        {
+            "id": t.id,
+            "action": t.action_name,
+            "target_type": t.target_type,
+            "target_iid": t.target.get("iid") if isinstance(t.target, dict) else getattr(t.target, "iid", None),
+            "target_title": t.target.get("title") if isinstance(t.target, dict) else getattr(t.target, "title", None),
+            "project_id": t.project.get("id") if isinstance(t.project, dict) else getattr(t.project, "id", None),
+            "body": t.body,
+            "created_at": t.created_at,
+            "author": (t.author or {}).get("username") if isinstance(t.author, dict) else None,
+        }
+        for t in todos
+    ]
+
+
+def get_done_todos(limit: int = 100) -> list[dict]:
+    """Recently completed todos for the bot user (newest first) — the deep
+    audit's input (#30): a DONE mention todo that nobody actually handled is
+    the only trace of an invisibly lost callout."""
+    gl = get_client()
+    todos = gl.todos.list(state="done", per_page=limit, get_all=False)
     return [
         {
             "id": t.id,

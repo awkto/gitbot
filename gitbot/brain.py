@@ -27,6 +27,51 @@ async def decide_and_act(sit: Situation) -> None:
 
     wf_id = str(uuid.uuid4())[:8]
     target_str = f"{sit.target_type} #{sit.target_iid}"
+    return await _decide_and_act(sit, wf_id, target_str)
+
+
+async def _run_task_workflow(kind: str, sit, wf_id: str,
+                             placeholder_id: int | None) -> tuple[str, object]:
+    """Run implement/orchestrate with failure-triggered escalation (#31).
+
+    On failure, a cheap diagnosis classifies the attempt: capability →
+    retry once, one model tier up; transient → retry once, same tier;
+    environment/impossible → the failure stands. Max 2 attempts total; a
+    pinned model is never overridden.
+    """
+    from gitbot import engine_sdk
+
+    runner = (engine_sdk.run_orchestrate if kind == "orchestrate"
+              else engine_sdk.run_implement)
+    result, ok = await runner(sit, wf_id, placeholder_id)
+    if ok is not False or not settings.escalation_enabled:
+        return result, ok
+
+    verdict, reason = await engine_sdk.diagnose_failure(sit, kind, result)
+    tracker.log("info", f"Failure diagnosis: {verdict} — {reason}", wf_id)
+    if verdict == "capability":
+        wf = "orchestrate" if kind == "orchestrate" else "implement"
+        used = engine_sdk._workflow_model(wf, sit.task_complexity, sit.min_tier)
+        bumped = engine_sdk.next_tier(used)
+        if not bumped:
+            log.info("Escalation: no tier above %s — failure stands", used)
+            return result, ok
+        sit.min_tier = bumped
+    elif verdict != "transient":
+        return result, ok  # environment / impossible: a retry can't help
+
+    sit.prior_failure = result[:1500]
+    tracker.escalation(wf_id)
+    tracker.log("info",
+                f"Retrying ({verdict})"
+                + (f" one tier up on {sit.min_tier}" if verdict == "capability"
+                   else " on the same tier"), wf_id)
+    log.info("Escalation retry (%s, %s) for %s #%s",
+             verdict, sit.min_tier or "same tier", sit.target_type, sit.target_iid)
+    return await runner(sit, wf_id, placeholder_id)
+
+
+async def _decide_and_act(sit, wf_id: str, target_str: str) -> None:
     wf = tracker.start_workflow(wf_id, sit.trigger, target_str, sit.project_name,
                                 target_url=sit.target_web_url)
     tracker.log("info", f"Started: {target_str} ({sit.trigger})", wf_id)
@@ -73,12 +118,8 @@ async def decide_and_act(sit: Situation) -> None:
             tracker.log("info", f"Answer received — resuming task ({kind})...", wf_id)
             _set_working_label(sit)
             owns_labels = True
-            if kind == "orchestrate":
-                sdk_result, sdk_ok = await engine_sdk.run_orchestrate(
-                    sit, wf_id, placeholder_id)
-            else:
-                sdk_result, sdk_ok = await engine_sdk.run_implement(
-                    sit, wf_id, placeholder_id)
+            sdk_result, sdk_ok = await _run_task_workflow(
+                kind, sit, wf_id, placeholder_id)
 
         elif sit.trigger in ("mentioned", "comment"):
             # Comment intent triage: a plain answer must not churn labels
@@ -94,12 +135,8 @@ async def decide_and_act(sit: Situation) -> None:
                 tracker.log("info", f"Comment is a work request ({intent}) — running {kind}...", wf_id)
                 _set_working_label(sit)
                 owns_labels = True
-                if kind == "orchestrate":
-                    sdk_result, sdk_ok = await engine_sdk.run_orchestrate(
-                        sit, wf_id, placeholder_id)
-                else:
-                    sdk_result, sdk_ok = await engine_sdk.run_implement(
-                        sit, wf_id, placeholder_id)
+                sdk_result, sdk_ok = await _run_task_workflow(
+                    kind, sit, wf_id, placeholder_id)
             else:
                 tracker.log("info", "Running SDK agent loop (answer)...", wf_id)
                 sdk_result = await engine_sdk.run_mention(sit, wf_id, placeholder_id)
@@ -109,12 +146,8 @@ async def decide_and_act(sit: Situation) -> None:
             tracker.add_phase(wf_id, "agent")
             tracker.log("info", f"Running SDK agent loop ({kind})...", wf_id)
             _set_working_label(sit)
-            if kind == "orchestrate":
-                sdk_result, sdk_ok = await engine_sdk.run_orchestrate(
-                    sit, wf_id, placeholder_id)
-            else:
-                sdk_result, sdk_ok = await engine_sdk.run_implement(
-                    sit, wf_id, placeholder_id)
+            sdk_result, sdk_ok = await _run_task_workflow(
+                kind, sit, wf_id, placeholder_id)
 
         elif (sit.target_type == "MergeRequest"
                 and sit.trigger in ("review_requested", "assigned", "resumed")):

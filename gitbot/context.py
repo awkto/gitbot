@@ -94,6 +94,13 @@ class Situation:
     # (full conversation state) instead of rebuilding from a snapshot.
     sdk_session_id: str = ""
 
+    # Failure-triggered escalation (github/gitbot#31), set by the retry:
+    # min_tier floors model selection one tier above the failed attempt
+    # (capability failures); prior_failure is fed into the retry prompt so
+    # the second attempt addresses the diagnosed cause.
+    min_tier: str = ""
+    prior_failure: str = ""
+
     # Pending work from state DB — always available (cheap local lookup)
     pending_question: dict | None = None
 

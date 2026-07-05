@@ -36,18 +36,38 @@ Also rate the task's complexity 1-10:
   dependent stages, anything where a wrong step is expensive."""
 
 _TIER_ALIAS = {"cheap": "haiku", "mid": "sonnet", "strong": "opus"}
+_TIER_ORDER = ["haiku", "sonnet", "opus"]
 
 
-def _workflow_model(workflow: str, complexity: int | None) -> str:
+def next_tier(model: str) -> str | None:
+    """The tier alias one step above `model` (#31 escalation). None when
+    already at the top or when the model is a pinned id (an explicit pin is
+    an operator decision escalation must not override)."""
+    if model in _TIER_ORDER:
+        i = _TIER_ORDER.index(model)
+        if i + 1 < len(_TIER_ORDER):
+            return _TIER_ORDER[i + 1]
+    return None
+
+
+def _workflow_model(workflow: str, complexity: int | None,
+                    min_tier: str = "") -> str:
     """Model selection is the harness's job, not the SDK's.
 
     Admin override per workflow wins (alias or pinned id); "auto" maps the
     triage complexity score to a tier ALIAS — the SDK resolves haiku/sonnet/
     opus to the current model of that tier, so nothing here goes stale when
     Anthropic ships or sunsets models.
+
+    min_tier is the #31 escalation floor: a capability-failure retry runs at
+    least one tier above the failed attempt. It raises tier aliases only —
+    a pinned model id is an operator decision and is returned untouched.
     """
     override = getattr(settings, f"model_{workflow}", "auto") or "auto"
     if override != "auto":
+        if (min_tier and override in _TIER_ORDER
+                and _TIER_ORDER.index(override) < _TIER_ORDER.index(min_tier)):
+            return min_tier
         return override
     c = complexity if complexity is not None else 5
     if workflow == "mention":
@@ -56,7 +76,10 @@ def _workflow_model(workflow: str, complexity: int | None) -> str:
         tier = "strong"
     else:  # implement / orchestrate — never below mid: it writes things
         tier = "strong" if c >= 8 else "mid"
-    return _TIER_ALIAS[tier]
+    model = _TIER_ALIAS[tier]
+    if min_tier and _TIER_ORDER.index(model) < _TIER_ORDER.index(min_tier):
+        return min_tier
+    return model
 
 
 _CLASSIFY_RE = re.compile(r"\b([a-z_]+)\b(?:\s+(\d{1,2}))?")
@@ -736,8 +759,14 @@ def _clone_repo(project_id: int, workdir: str,
     cmd = ["git", "clone", "--depth", "50"]
     if branch:
         cmd += ["--branch", branch]
-    subprocess.run(cmd + [url, repo_path],
-                   check=True, capture_output=True, timeout=120)
+    try:
+        subprocess.run(cmd + [url, repo_path],
+                       check=True, capture_output=True, timeout=120)
+    except subprocess.CalledProcessError as e:
+        # The failed command embeds the authenticated URL (token!). Re-raise
+        # with a scrubbed message so nothing downstream can leak it.
+        err = (e.stderr.decode()[:200] if e.stderr else str(e))
+        raise RuntimeError(f"git clone failed: {glc.redact(err)}") from None
     bot = settings.bot_username
     for k, v in (("user.name", "GitBot"), ("user.email", f"{bot}@{base}")):
         subprocess.run(["git", "-C", repo_path, "config", k, v],
@@ -984,7 +1013,7 @@ async def _run_implement_in(sit: Situation, wf_id: str,
             queue_rules=_queue_rules(),
             asking_rules=_asking_rules(requester),
         ),
-        model=_workflow_model("implement", sit.task_complexity),
+        model=_workflow_model("implement", sit.task_complexity, sit.min_tier),
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
         allowed_tools=allowed,
         permission_mode="dontAsk",
@@ -1025,6 +1054,15 @@ async def _run_implement_in(sit: Situation, wf_id: str,
                 f"(locally after fetch, or on the remote) and whether an MR is already "
                 f"open; continue from the existing state instead of starting over."
             )
+
+    if sit.prior_failure:
+        # #31: retry attempt — the diagnosed failure travels with the prompt
+        # so the second attempt addresses the cause instead of repeating it.
+        prompt += (
+            f"\n\n⚠️ A PREVIOUS ATTEMPT AT THIS TASK FAILED. Its report:\n"
+            f"<previous_failure>\n{sit.prior_failure}\n</previous_failure>\n"
+            f"Understand what went wrong and take a different, correct approach."
+        )
 
     log.info("SDK engine: implement workflow start (%s %s%s, branch=%s, resumed=%s, "
              "resume_session=%s, model=%s, complexity=%s)",
@@ -1238,7 +1276,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             queue_rules=_queue_rules(),
             asking_rules=_asking_rules(requester),
         ),
-        model=_workflow_model("orchestrate", sit.task_complexity),
+        model=_workflow_model("orchestrate", sit.task_complexity, sit.min_tier),
         mcp_servers={"gitlab": _build_gitlab_mcp_server(sit.project_id, sit)},
         allowed_tools=allowed,
         permission_mode="dontAsk",
@@ -1266,6 +1304,15 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             "projects is a failure.\n\n"
             f"<state_snapshot>\n{snapshot}\n</state_snapshot>\n\n"
             "--- Original task below ---\n\n" + prompt
+        )
+
+    if sit.prior_failure:
+        # #31: retry attempt — the diagnosed failure travels with the prompt
+        # so the second attempt addresses the cause instead of repeating it.
+        prompt += (
+            f"\n\n⚠️ A PREVIOUS ATTEMPT AT THIS TASK FAILED. Its report:\n"
+            f"<previous_failure>\n{sit.prior_failure}\n</previous_failure>\n"
+            f"Understand what went wrong and take a different, correct approach."
         )
 
     log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d, resumed=%s, "
@@ -1497,7 +1544,7 @@ async def run_review(sit: Situation, wf_id: str = "",
 # Assigned-issue triage: single-repo code change vs orchestration
 # ---------------------------------------------------------------------------
 
-async def _classify_complete(system: str, prompt: str) -> str:
+async def _classify_complete(system: str, prompt: str, max_tokens: int = 32) -> str:
     """One-shot Haiku completion for the triage classifiers — the only LLM
     calls outside the Agent SDK loops."""
     from anthropic import AsyncAnthropic
@@ -1505,11 +1552,58 @@ async def _classify_complete(system: str, prompt: str) -> str:
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
     msg = await client.messages.create(
         model=settings.classifier_model,
-        max_tokens=32,
+        max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
     return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+
+
+# ---------------------------------------------------------------------------
+# Failure diagnosis (#31): classify a failed attempt at the attempt boundary
+# so the harness can decide retry / escalate / stand. In app code so every
+# model instance judges failures the same way.
+# ---------------------------------------------------------------------------
+
+ESCALATION_SCALE = """\
+Classify why an AI agent's work attempt failed, from its final report:
+
+- capability — the agent tried but produced wrong or incomplete work,
+  misunderstood the task, went in circles, or gave up on something that IS
+  doable; the verification gate failed on quality. A stronger model may well
+  succeed.
+- environment — permissions, authentication, protected branches, missing
+  config or infrastructure (401/403/404 on things that should exist). No
+  model can fix this; a human must change something first.
+- transient — network errors, 5xx responses, timeouts, rate limits, race
+  conditions. The same attempt would likely succeed if simply retried.
+- impossible — the task itself is contradictory or cannot be done as stated,
+  and the agent's reasoning for that conclusion is sound.
+
+Reply with exactly one word (capability/environment/transient/impossible),
+then a dash and a one-line reason."""
+
+
+async def diagnose_failure(sit: Situation, workflow: str, report: str) -> tuple[str, str]:
+    """Classify a failed attempt. Returns (verdict, reason); on classifier
+    trouble defaults to ("impossible", ...) — i.e. the failure stands, no
+    autonomous extra spend on an unknown."""
+    prompt = (
+        f"Workflow: {workflow}\n"
+        f"Task: {sit.target_title}\n\n"
+        f"The agent's failure report / gate result:\n{report[:1500]}"
+    )
+    try:
+        raw = (await _classify_complete(ESCALATION_SCALE, prompt,
+                                        max_tokens=80)).strip()
+    except Exception as e:
+        log.warning("Failure diagnosis errored: %s", e)
+        return "impossible", "diagnosis unavailable"
+    word = raw.split()[0].strip(":,.-").lower() if raw.split() else "impossible"
+    if word not in ("capability", "environment", "transient", "impossible"):
+        word = "impossible"
+    reason = raw.partition("-")[2].strip() or raw[:120]
+    return word, reason
 
 
 CLASSIFY_COMMENT_PROMPT = """\

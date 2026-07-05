@@ -6,6 +6,7 @@ or if webhooks were missed).
 """
 
 import logging
+import time
 
 from gitbot import gitlab_client as glc
 
@@ -291,6 +292,72 @@ _PARKED_LABELS = ["gitbot::waiting"]
 _QUEUED_LABELS = ["gitbot::queued"]
 
 
+async def deep_audit(window_hours: float = 26) -> int:
+    """Nightly deep audit (github/gitbot#30): find INVISIBLY lost callouts.
+
+    The known race: GitLab auto-completes the bot's mention todo the moment
+    the bot posts ANY comment on the target — including a concurrent
+    session's placeholder. If that mention's webhook was also lost, nothing
+    pending remains: no todo, no label, no work row. The only trace is a
+    DONE todo that nobody actually handled.
+
+    Scan the window's done todos; for each mention/assignment not authored by
+    the bot: if no work item was created for the target after the todo AND
+    the thread shows no bot reply, replay it. Pure API work — an LLM session
+    runs only when something lost is actually found. Returns replay count.
+    """
+    from datetime import datetime
+
+    from gitbot import state
+    from gitbot.config import settings
+
+    try:
+        todos = glc.get_done_todos()
+    except Exception:
+        log.exception("Deep audit: could not list done todos")
+        return 0
+
+    cutoff = time.time() - window_hours * 3600
+    replayed = 0
+    for todo in todos:
+        action = _ACTION_MAP.get(todo["action"], todo["action"])
+        if action not in ("mentioned", "assigned", "review_requested"):
+            continue
+        if todo.get("author") == settings.bot_username:
+            continue  # self-handoffs enter only via gitbot::queued (#28)
+        try:
+            created_ts = datetime.fromisoformat(
+                todo["created_at"].replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if created_ts < cutoff:
+            continue
+        project_id, target_type, target_iid = (
+            todo["project_id"], todo["target_type"], todo["target_iid"])
+        if not (project_id and target_iid):
+            continue
+        # A work item created around/after the todo = some session took the event.
+        if state.has_work_since(project_id, target_type, target_iid,
+                                created_ts - 60):
+            continue
+        if action == "mentioned":
+            handled = _mention_handled(project_id, target_type, target_iid,
+                                       todo.get("body") or "")
+        else:
+            handled = _check_if_handled(project_id, target_type, target_iid)
+        if handled:
+            continue
+        log.warning("Deep audit: LOST %s on %s #%s (todo %s done, but no work "
+                    "item and no bot reply) — replaying",
+                    action, target_type, target_iid, todo["id"])
+        try:
+            await _replay_todo(project_id, target_type, target_iid, action, todo)
+            replayed += 1
+        except Exception:
+            log.exception("Deep audit: replay failed for todo %s", todo["id"])
+    return replayed
+
+
 async def reconcile() -> None:
     """Periodic sweep: resume orphaned (gitbot::working with no live workflow),
     parked (gitbot::waiting) and queued (gitbot::queued) items. Safe to run
@@ -305,6 +372,23 @@ async def reconcile() -> None:
         await process_pending_todos(min_age_seconds=_TODO_MIN_AGE_SECONDS)
     except Exception:
         log.exception("Reconcile: todo sweep failed")
+
+    # Nightly deep audit (#30) rides the reconcile cadence: once per
+    # deep_audit_hours, scan recently-DONE todos for invisibly lost callouts.
+    from gitbot.config import settings as _settings
+    if _settings.deep_audit_hours > 0:
+        from gitbot import state as _state
+        try:
+            last = float(_state.get_meta("last_deep_audit") or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if time.time() - last >= _settings.deep_audit_hours * 3600:
+            _state.set_meta("last_deep_audit", str(time.time()))
+            try:
+                n = await deep_audit(window_hours=_settings.deep_audit_hours + 2)
+                log.info("Deep audit complete: %d lost callout(s) replayed", n)
+            except Exception:
+                log.exception("Deep audit failed")
 
     found: dict[tuple[int, str, int], dict] = {}
     for label in _WORKING_LABELS + _PARKED_LABELS + _QUEUED_LABELS:

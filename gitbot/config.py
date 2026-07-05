@@ -84,6 +84,20 @@ class Settings(BaseSettings):
     # scheduler can also POST /reconcile with the webhook secret.
     reconcile_minutes: int = 10
 
+    # Nightly deep audit (#30): every this-many hours, scan recently-DONE
+    # todos for callouts lost invisibly (GitLab auto-completes a mention todo
+    # when the bot posts ANY comment — a concurrent session's placeholder
+    # counts — so a lost webhook + that race leaves no pending trace). Pure
+    # API scan; an LLM session runs only if something lost is found. 0 = off.
+    deep_audit_hours: int = 24
+
+    # Failure-triggered escalation (#31): when an implement/orchestrate
+    # attempt fails, a cheap diagnosis classifies the failure and the harness
+    # retries ONCE — capability failures one model tier up, transient ones on
+    # the same tier; environment/impossible failures stand. Bounded extra
+    # spend: max 2 attempts, 1 tier step, never above a pinned model.
+    escalation_enabled: bool = True
+
     # Clarifying questions: after researching, the agent scores a would-be
     # question 1-10 against the rubric in engine_sdk.QUESTION_SCALE (defined
     # in app code so every model instance ranks consistently) and only asks

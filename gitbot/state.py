@@ -63,8 +63,41 @@ def _get_db() -> sqlite3.Connection:
                 created_at REAL NOT NULL
             )
         """)
+        # Tiny durable key/value store (e.g. the deep audit's last-run stamp).
+        _db.execute("""
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
         _db.commit()
     return _db
+
+
+def get_meta(key: str) -> str | None:
+    db = _get_db()
+    row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_meta(key: str, value: str) -> None:
+    db = _get_db()
+    db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+    db.commit()
+
+
+def has_work_since(project_id: int, target_type: str, target_iid: int,
+                   since_ts: float) -> bool:
+    """True when any work item exists for the target created at/after
+    since_ts — i.e. SOME session processed an event for it (deep audit #30)."""
+    db = _get_db()
+    row = db.execute(
+        """SELECT 1 FROM work_items
+           WHERE project_id=? AND target_type=? AND target_iid=? AND created_at>=?
+           LIMIT 1""",
+        (project_id, target_type, target_iid, since_ts),
+    ).fetchone()
+    return row is not None
 
 
 def record_managed_hook(group_id: int, group_path: str, hook_id: int, url: str) -> None:
