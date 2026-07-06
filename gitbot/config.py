@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     # API scan; an LLM session runs only if something lost is found. 0 = off.
     deep_audit_hours: int = 24
 
+    # Debug/verbose: append the model that produced a result as a small footer
+    # on GitBot's GitLab comments, so you can see which model any given output
+    # came from. Off by default; toggle live in the admin panel.
+    show_model_footer: bool = False
+
     # Failure-triggered escalation (#31): when an implement/orchestrate
     # attempt fails, a cheap diagnosis classifies the failure and the harness
     # retries ONCE — capability failures one model tier up, transient ones on

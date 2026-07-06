@@ -186,12 +186,16 @@ def test_parse_classification_defaults():
 
 
 def test_auto_model_mapping():
+    # Auto leans on the mid tier (sonnet); opus is reached upfront only for the
+    # clearly-hardest write tasks, otherwise via #31 escalation (github/gitbot#42).
     assert _workflow_model("mention", 2) == "haiku"
     assert _workflow_model("mention", 5) == "sonnet"
     assert _workflow_model("implement", 5) == "sonnet"
-    assert _workflow_model("orchestrate", 9) == "opus"
+    assert _workflow_model("implement", 8) == "sonnet"   # was opus at ≥8
+    assert _workflow_model("orchestrate", 9) == "opus"   # clearly-hardest only
     assert _workflow_model("orchestrate", None) == "sonnet"
-    assert _workflow_model("review", 1) == "opus"
+    assert _workflow_model("review", 1) == "sonnet"      # was always opus
+    assert _workflow_model("review", 10) == "sonnet"     # review never auto-picks opus
 
 
 def test_workflow_model_override_and_reset():

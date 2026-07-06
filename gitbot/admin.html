@@ -660,6 +660,10 @@ function renderBehaviour(b, src) {
         <input type="checkbox" ${esc?'checked':''} ${escLocked?'disabled':''}
                onchange="setBehaviour('escalation_enabled', this.checked)">
         Retry failed tasks one model tier up (escalation)${escLocked?' <span style="color:#9e6a03;font-size:0.65rem">(env)</span>':''}</label>
+      <label style="display:flex;align-items:center;gap:0.5rem;${(src.show_model_footer==='env')?'opacity:0.55':''}">
+        <input type="checkbox" ${b.show_model_footer?'checked':''} ${(src.show_model_footer==='env')?'disabled':''}
+               onchange="setBehaviour('show_model_footer', this.checked)">
+        Show the model used as a footer on comments (debug)${(src.show_model_footer==='env')?' <span style="color:#9e6a03;font-size:0.65rem">(env)</span>':''}</label>
       <label style="display:flex;align-items:center;gap:0.4rem;${auditLocked?'opacity:0.55':''}">
         Nightly deep audit every
         <input type="number" min="0" max="168" value="${audit}" ${auditLocked?'disabled':''}

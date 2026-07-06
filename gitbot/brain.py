@@ -71,6 +71,15 @@ async def _run_task_workflow(kind: str, sit, wf_id: str,
     return await runner(sit, wf_id, placeholder_id)
 
 
+def _model_footer(sit, text: str) -> str:
+    """Optionally append the model that produced this result as a small footer
+    (debug/verbose toggle, github/gitbot#42). Shows the tier alias or pinned id
+    GitBot requested (the SDK resolves an alias to the current tier model)."""
+    if not text or not settings.show_model_footer or not getattr(sit, "model_used", ""):
+        return text
+    return f"{text}\n\n<sub>🤖 model: <code>{sit.model_used}</code></sub>"
+
+
 async def _decide_and_act(sit, wf_id: str, target_str: str) -> None:
     wf = tracker.start_workflow(wf_id, sit.trigger, target_str, sit.project_name,
                                 target_url=sit.target_web_url)
@@ -187,7 +196,7 @@ async def _decide_and_act(sit, wf_id: str, target_str: str) -> None:
             state.complete_work_item(work_id)
             return
 
-        _update_placeholder(sit, placeholder_id, sdk_result)
+        _update_placeholder(sit, placeholder_id, _model_footer(sit, sdk_result))
         if sit.event_type == "Note Hook" and sit.comment_body:
             # Tick off the GitLab TODO this mention created — the
             # todo ledger is how interrupted callouts are found, so

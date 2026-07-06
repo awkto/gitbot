@@ -54,6 +54,15 @@ def _workflow_model(workflow: str, complexity: int | None,
                     min_tier: str = "") -> str:
     """Model selection is the harness's job, not the SDK's.
 
+    Philosophy (github/gitbot#42): default to the mid tier (sonnet) for real
+    work and let the strong tier (opus) be reached by FAILURE — the #31
+    escalation path already retries a capability-failed attempt one tier up —
+    rather than by guessing an upfront complexity score. Sonnet 5 ≈ Opus 4.8
+    at ~half the price, so "cheap default" is genuinely strong. Opus is used
+    upfront only for the clearly-hardest write tasks (a small optimisation to
+    skip a doomed sonnet attempt). An org that wants higher quality on small
+    tasks pins the per-workflow model — that override always wins.
+
     Admin override per workflow wins (alias or pinned id); "auto" maps the
     triage complexity score to a tier ALIAS — the SDK resolves haiku/sonnet/
     opus to the current model of that tier, so nothing here goes stale when
@@ -73,9 +82,13 @@ def _workflow_model(workflow: str, complexity: int | None,
     if workflow == "mention":
         tier = "cheap" if c <= 3 else "mid"
     elif workflow == "review":
-        tier = "strong"
-    else:  # implement / orchestrate — never below mid: it writes things
-        tier = "strong" if c >= 8 else "mid"
+        # Sonnet 5 ≈ Opus 4.8 and review runs on every MR — default mid for
+        # the cost win. Review has no finish gate so escalation won't rescue
+        # it; pin model_review=opus if you want max-rigor reviews.
+        tier = "mid"
+    else:  # implement / orchestrate — mid by default; opus only for the
+        # clearly-hardest upfront (escalation covers the rest on real failure).
+        tier = "strong" if c >= 9 else "mid"
     model = _TIER_ALIAS[tier]
     if min_tier and _TIER_ORDER.index(model) < _TIER_ORDER.index(min_tier):
         return min_tier
@@ -555,6 +568,7 @@ async def run_mention(sit: Situation, wf_id: str = "",
     prompt_parts.append(f"Comment by @{sit.actor} (answer this):\n{sit.comment_body}")
     prompt = "\n\n".join(prompt_parts)
 
+    sit.model_used = options.model
     log.info("SDK engine: mention workflow start (%s #%s, max_turns=%d, model=%s, complexity=%s)",
              sit.target_type, sit.target_iid, MENTION_MAX_TURNS,
              options.model, sit.task_complexity)
@@ -1064,6 +1078,7 @@ async def _run_implement_in(sit: Situation, wf_id: str,
             f"Understand what went wrong and take a different, correct approach."
         )
 
+    sit.model_used = options.model
     log.info("SDK engine: implement workflow start (%s %s%s, branch=%s, resumed=%s, "
              "resume_session=%s, model=%s, complexity=%s)",
              "MR" if mr_mode else "Issue",
@@ -1315,6 +1330,7 @@ async def run_orchestrate(sit: Situation, wf_id: str = "",
             f"Understand what went wrong and take a different, correct approach."
         )
 
+    sit.model_used = options.model
     log.info("SDK engine: orchestrate workflow start (Issue #%s, max_turns=%d, resumed=%s, "
              "resume_session=%s, model=%s, complexity=%s)",
              sit.target_iid, ORCHESTRATE_MAX_TURNS, sit.is_replay,
@@ -1511,6 +1527,7 @@ async def run_review(sit: Situation, wf_id: str = "",
     if sit.comment_body:
         prompt += f"\n\nLatest comment from @{sit.actor}:\n{sit.comment_body}"
 
+    sit.model_used = options.model
     log.info("SDK engine: review workflow start (MR !%s, max_turns=%d, model=%s, complexity=%s)",
              sit.target_iid, REVIEW_MAX_TURNS, options.model, sit.task_complexity)
 

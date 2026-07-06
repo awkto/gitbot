@@ -88,6 +88,10 @@ class Situation:
     # classifier — drives auto model selection.
     task_complexity: int | None = None
 
+    # The model the workflow actually ran on (tier alias or pinned id) — set by
+    # each run_* when it builds options; used for the optional comment footer.
+    model_used: str = ""
+
     # Claude Agent SDK session id (github/gitbot#25). Captured from the SDK
     # message stream as soon as a session starts and persisted into the work
     # item; resume paths load it back so the SDK continues the SAME session

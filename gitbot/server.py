@@ -269,7 +269,7 @@ async def admin_save_config(request: Request):
 _BEHAVIOUR_KEYS = [
     "act_on_issue_assignee_comments", "act_on_mr_assignee_comments",
     "act_on_mr_author_comments", "act_on_mr_reviewer_comments",
-    "escalation_enabled", "deep_audit_hours",
+    "escalation_enabled", "deep_audit_hours", "show_model_footer",
 ]
 
 
