@@ -106,6 +106,18 @@ class Settings(BaseSettings):
     # API scan; an LLM session runs only if something lost is found. 0 = off.
     deep_audit_hours: int = 24
 
+    # Claude Code in CI pipelines (#41): delegate heavy/agentic work to a
+    # dedicated GitLab project that runs Claude Code non-interactively. GitBot
+    # owns the pipeline in this "runner project" and triggers it with the
+    # target context in variables. The image is customer-owned — extend a
+    # Claude Code base with your own CLIs (bao, gh, doctl, ...) and add their
+    # tokens as CI/CD variables on the project; GitBot only sets the two
+    # required secrets (Anthropic key + a push token).
+    claude_ci_enabled: bool = False
+    claude_ci_project: str = ""          # runner project id or path/with/namespace
+    claude_ci_image: str = "awkto/claude-code:latest"
+    claude_ci_ref: str = "main"          # ref the runner project's pipeline runs on
+
     # Debug/verbose: append the model that produced a result as a small footer
     # on GitBot's GitLab comments, so you can see which model any given output
     # came from. Off by default; toggle live in the admin panel.

@@ -212,6 +212,78 @@ def commit_files(
     })
 
 
+# ---------------------------------------------------------------------------
+# Runner-project helpers for Claude Code in CI (#41)
+# ---------------------------------------------------------------------------
+
+def get_project(id_or_path: str) -> dict | None:
+    """Resolve a project by numeric id or path/with/namespace. None if absent."""
+    gl = get_client()
+    try:
+        p = gl.projects.get(id_or_path)
+    except Exception:
+        return None
+    return {"id": p.id, "path_with_namespace": p.path_with_namespace,
+            "default_branch": p.default_branch or "main", "web_url": p.web_url}
+
+
+def create_project(name: str, namespace_path: str | None = None) -> dict:
+    """Create a project (the Claude CI runner project). `namespace_path` is a
+    group path to create it under (required for tokens/service accounts that
+    can't own personal-namespace projects); omit for the token's own space."""
+    gl = get_client()
+    attrs = {"name": name, "path": name, "visibility": "private",
+             "description": "GitBot Claude Code CI runner (managed by GitBot)"}
+    if namespace_path:
+        attrs["namespace_id"] = gl.groups.get(namespace_path).id
+    p = gl.projects.create(attrs)
+    return {"id": p.id, "path_with_namespace": p.path_with_namespace,
+            "default_branch": p.default_branch or "main", "web_url": p.web_url}
+
+
+def set_project_variable(project_id: int, key: str, value: str,
+                         masked: bool = True) -> None:
+    """Create or update a (masked) CI/CD variable on a project. Idempotent."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    # GitLab rejects masking values that don't meet its masking rules; fall
+    # back to unmasked-but-still-protected rather than failing setup.
+    for attempt_masked in (masked, False):
+        data = {"value": value, "masked": attempt_masked, "protected": False}
+        try:
+            try:
+                var = project.variables.get(key)
+                for k, v in data.items():
+                    setattr(var, k, v)
+                var.save()
+            except Exception:
+                project.variables.create({"key": key, **data})
+            return
+        except Exception:
+            if not attempt_masked:
+                raise  # unmasked also failed — surface it
+
+
+def list_project_runners(project_id: int) -> list[dict]:
+    """Runners available to a project (its own + inherited group/instance)."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    runners = project.runners.list(get_all=True)
+    return [{"id": r.id, "description": getattr(r, "description", ""),
+             "active": getattr(r, "active", getattr(r, "paused", None) is False),
+             "online": getattr(r, "online", None),
+             "is_shared": getattr(r, "is_shared", None)} for r in runners]
+
+
+def trigger_pipeline(project_id: int, ref: str, variables: dict) -> dict:
+    """Trigger a pipeline on ref with variables. Returns id/status/web_url."""
+    gl = get_client()
+    project = gl.projects.get(project_id)
+    var_list = [{"key": k, "value": str(v)} for k, v in variables.items()]
+    pipeline = project.pipelines.create({"ref": ref, "variables": var_list})
+    return {"id": pipeline.id, "status": pipeline.status, "web_url": pipeline.web_url}
+
+
 def create_merge_request(
     project_id: int,
     source_branch: str,

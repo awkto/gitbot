@@ -162,6 +162,35 @@
   </div>
   <div id="groupList"></div>
 
+  <!-- Claude Code in Pipelines (#41) -->
+  <h2>Claude Code in Pipelines <span style="font-size:0.75rem;color:#484f58">— delegate heavy coding to a CI runner project</span></h2>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:0.75rem;margin-bottom:1rem;font-size:0.85rem">
+    <div id="ccStatus" style="margin-bottom:0.5rem;color:#8b949e"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem">
+      <label style="font-size:0.7rem;color:#8b949e">Runner project (id, path/with/namespace, or a name to create)<br>
+        <input id="ccProject" placeholder="automation/gitbot-claude-runner" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px;font-size:0.8rem"></label>
+      <label style="font-size:0.7rem;color:#8b949e">Container image (customer-owned; extend with your CLIs)<br>
+        <input id="ccImage" placeholder="awkto/claude-code:latest" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px;font-size:0.8rem"></label>
+    </div>
+    <div style="margin-top:0.5rem">
+      <label style="font-size:0.75rem;color:#8b949e"><input id="ccCreate" type="checkbox"> Create the project if it doesn't exist</label>
+      <button class="btn primary" style="margin-left:0.5rem" onclick="ccSetup()">Enable &amp; verify</button>
+      <button class="btn" onclick="ccDisable()">Disable</button>
+      <span id="ccMsg" style="margin-left:0.5rem;font-size:0.8rem"></span>
+    </div>
+    <div id="ccRunners" style="margin-top:0.4rem;font-size:0.75rem"></div>
+    <div style="border-top:1px solid #21262d;margin-top:0.6rem;padding-top:0.5rem">
+      <div style="font-size:0.7rem;color:#8b949e;margin-bottom:0.3rem">Test dispatch — trigger a pipeline for a target:</div>
+      <div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center">
+        <input id="ccTgtProject" placeholder="target path/with/namespace" style="flex:1;min-width:180px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.25rem;border-radius:4px;font-size:0.75rem">
+        <input id="ccTgtIid" placeholder="iid" style="width:4rem;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.25rem;border-radius:4px;font-size:0.75rem">
+        <input id="ccPrompt" placeholder="prompt" style="flex:2;min-width:200px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.25rem;border-radius:4px;font-size:0.75rem">
+        <button class="btn" onclick="ccDispatch()">Dispatch</button>
+      </div>
+      <div id="ccDispatchResult" style="margin-top:0.3rem;font-size:0.75rem"></div>
+    </div>
+  </div>
+
   <!-- Triggers & Behaviour -->
   <h2>Triggers &amp; Behaviour <span style="font-size:0.75rem;color:#484f58">— how GitBot decides to engage</span></h2>
   <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:0.75rem;margin-bottom:1rem;font-size:0.85rem">
@@ -281,7 +310,8 @@ async function fetchStats() {
         <span id="wfModelMsg" style="font-size:0.7rem;color:#3fb950"></span>
       </div>`;
 
-    renderBehaviour(d.behaviour || {}, src);
+    renderBehaviour(d.config.behaviour || {}, src);
+    renderClaudeCI(d.config.claude_ci || {});
 
     document.getElementById('statsGrid').innerHTML = `
       <div class="card"><div class="label">Uptime</div><div class="value">${dur(d.uptime_seconds)}</div></div>
@@ -680,6 +710,55 @@ async function setBehaviour(key, value) {
     msg.textContent = r.ok ? '✓ saved' : '✗ ' + ((await r.json()).error || 'failed');
   } catch(e) { msg.textContent = '✗'; }
   setTimeout(() => { msg.textContent = ''; }, 2000);
+}
+
+// ---- Claude Code in Pipelines (#41) ----
+function renderClaudeCI(cc) {
+  const st = document.getElementById('ccStatus');
+  st.innerHTML = cc.enabled
+    ? `<span class="badge ok">enabled</span> project <code>${cc.project||'?'}</code> · image <code>${cc.image||''}</code>`
+    : '<span style="color:#8b949e">disabled</span>';
+  if (document.activeElement && ['ccProject','ccImage'].includes(document.activeElement.id)) return;
+  if (!document.getElementById('ccProject').value && cc.project) document.getElementById('ccProject').value = cc.project;
+  if (!document.getElementById('ccImage').value) document.getElementById('ccImage').value = cc.image || 'awkto/claude-code:latest';
+}
+async function ccSetup() {
+  const msg = document.getElementById('ccMsg');
+  const body = {project: document.getElementById('ccProject').value.trim(),
+                image: document.getElementById('ccImage').value.trim(),
+                create: document.getElementById('ccCreate').checked};
+  if (!body.project) { msg.innerHTML = '<span class="badge error">project required</span>'; return; }
+  msg.innerHTML = '<span style="color:#8b949e">Setting up…</span>';
+  try {
+    const d = await (await fetch(`${API}/claude-ci/setup`, {method:'POST', headers:JH, body:JSON.stringify(body)})).json();
+    if (d.status !== 'ok') { msg.innerHTML = `<span class="badge error">${d.error}</span>`; return; }
+    msg.innerHTML = `<span class="badge ok">ready</span> <a href="${d.project.web_url}" target="_blank" style="color:#58a6ff">${d.project.path_with_namespace}</a>`;
+    const rc = d.runner_count;
+    document.getElementById('ccRunners').innerHTML =
+      (rc ? `<span class="badge ok">${rc} runner(s)</span>` : '<span class="badge error">no runners</span>')
+      + (d.warnings||[]).map(w => ` <span style="color:#e3b341">⚠ ${w}</span>`).join('');
+    fetchStats();
+  } catch(e) { msg.innerHTML = `<span class="badge error">${e}</span>`; }
+}
+async function ccDisable() {
+  await fetch(`${API}/claude-ci/disable`, {method:'POST', headers:JH, body:'{}'});
+  document.getElementById('ccMsg').innerHTML = '<span class="badge">disabled</span>';
+  fetchStats();
+}
+async function ccDispatch() {
+  const r = document.getElementById('ccDispatchResult');
+  const body = {target_project: document.getElementById('ccTgtProject').value.trim(),
+                target_iid: document.getElementById('ccTgtIid').value.trim() || '0',
+                target_type: 'issue',
+                prompt: document.getElementById('ccPrompt').value.trim()};
+  if (!body.target_project || !body.prompt) { r.innerHTML = '<span class="badge error">target + prompt required</span>'; return; }
+  r.innerHTML = '<span style="color:#8b949e">Dispatching…</span>';
+  try {
+    const d = await (await fetch(`${API}/claude-ci/dispatch`, {method:'POST', headers:JH, body:JSON.stringify(body)})).json();
+    r.innerHTML = d.status === 'ok'
+      ? `<span class="badge ok">pipeline #${d.id} (${d.status})</span> <a href="${d.web_url}" target="_blank" style="color:#58a6ff">view</a>`
+      : `<span class="badge error">${d.error}</span>`;
+  } catch(e) { r.innerHTML = `<span class="badge error">${e}</span>`; }
 }
 
 function refresh() { fetchStats(); fetchAll(); }

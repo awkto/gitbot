@@ -197,6 +197,12 @@ async def admin_stats():
             "review": settings.model_review,
         },
         "behaviour": {k: getattr(settings, k) for k in _BEHAVIOUR_KEYS},
+        "claude_ci": {
+            "enabled": settings.claude_ci_enabled,
+            "project": settings.claude_ci_project,
+            "image": settings.claude_ci_image,
+            "ref": settings.claude_ci_ref,
+        },
     }
     from gitbot import config as cfg
     stats["config"]["sources"] = cfg.config_sources()
@@ -746,3 +752,65 @@ async def admin_onboard_provision(request: Request):
                  "" if not locked else f" (env-owned, not persisted: {locked})")
     r["status"] = "ok"
     return r
+
+
+# ---------------------------------------------------------------------------
+# Claude Code in CI pipelines (#41)
+# ---------------------------------------------------------------------------
+
+@app.post("/admin/api/claude-ci/setup")
+async def admin_claude_ci_setup(request: Request):
+    """Enable + provision the Claude CI runner project: adopt an existing
+    project or create one, set the required secrets, seed the pipeline, and
+    verify runners. Persists the settings on success."""
+    _check_admin()
+    data = await request.json()
+    project_spec = (data.get("project") or "").strip()
+    image = (data.get("image") or settings.claude_ci_image).strip()
+    create = bool(data.get("create"))
+    if not project_spec:
+        raise HTTPException(status_code=400, detail="project (id, path, or name) required")
+
+    from gitbot import claude_ci
+    try:
+        result = await asyncio.to_thread(claude_ci.setup, project_spec, image, create)
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
+
+    from gitbot import config as cfg
+    cfg.save_config({
+        "claude_ci_enabled": True,
+        "claude_ci_project": str(result["project"]["path_with_namespace"]),
+        "claude_ci_image": image,
+    })
+    result["status"] = "ok"
+    return result
+
+
+@app.post("/admin/api/claude-ci/disable")
+async def admin_claude_ci_disable(request: Request):
+    _check_admin()
+    from gitbot import config as cfg
+    cfg.save_config({"claude_ci_enabled": False})
+    return {"status": "ok"}
+
+
+@app.post("/admin/api/claude-ci/dispatch")
+async def admin_claude_ci_dispatch(request: Request):
+    """Trigger a Claude CI pipeline for a target — the manual/test entry point
+    (and the seam GitBot's workflows will call to delegate heavy work)."""
+    _check_admin()
+    data = await request.json()
+    prompt = (data.get("prompt") or "").strip()
+    target_project = (data.get("target_project") or "").strip()
+    if not prompt or not target_project:
+        raise HTTPException(status_code=400, detail="prompt and target_project required")
+    from gitbot import claude_ci
+    try:
+        pipe = await asyncio.to_thread(
+            claude_ci.dispatch, target_project,
+            data.get("target_type", "issue"), int(data.get("target_iid", 0)),
+            prompt, (data.get("allowed_tools") or "").strip())
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
+    return {"status": "ok", **pipe}
