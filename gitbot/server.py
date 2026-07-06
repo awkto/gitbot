@@ -196,6 +196,7 @@ async def admin_stats():
             "orchestrate": settings.model_orchestrate,
             "review": settings.model_review,
         },
+        "behaviour": {k: getattr(settings, k) for k in _BEHAVIOUR_KEYS},
     }
     from gitbot import config as cfg
     stats["config"]["sources"] = cfg.config_sources()
@@ -262,6 +263,34 @@ async def admin_save_config(request: Request):
     if not msg:
         msg.append("Nothing to save.")
     return {"status": "ok", "applied": applied, "locked": locked, "message": " ".join(msg)}
+
+
+# Triggers & Behaviour: role-follow toggles (#40) + escalation/deep-audit.
+_BEHAVIOUR_KEYS = [
+    "act_on_issue_assignee_comments", "act_on_mr_assignee_comments",
+    "act_on_mr_author_comments", "act_on_mr_reviewer_comments",
+    "escalation_enabled", "deep_audit_hours",
+]
+
+
+@app.post("/admin/api/behaviour")
+async def admin_set_behaviour(request: Request):
+    """Live-tune the Triggers & Behaviour settings. Persists to the config
+    store and applies to new events immediately (env-owned keys refused)."""
+    _check_admin()
+    data = await request.json()
+    from gitbot import config as cfg
+
+    updates = {k: v for k, v in data.items() if k in _BEHAVIOUR_KEYS}
+    if not updates:
+        raise HTTPException(status_code=400, detail="no known behaviour keys")
+    applied, locked = cfg.save_config(updates)
+    if locked:
+        return JSONResponse(
+            {"status": "error", "error": f"{', '.join(locked)} set via environment"},
+            status_code=400)
+    return {"status": "ok", "applied": applied,
+            "behaviour": {k: getattr(settings, k) for k in _BEHAVIOUR_KEYS}}
 
 
 @app.post("/admin/api/threshold")

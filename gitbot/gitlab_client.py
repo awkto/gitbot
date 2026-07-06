@@ -258,8 +258,21 @@ def get_mr_details(project_id: int, mr_iid: int) -> dict:
         "target_branch": mr.target_branch,
         "author": mr.author.get("username") if isinstance(mr.author, dict) else "?",
         "assignees": [a.get("username") for a in (mr.assignees or [])],
+        "reviewers": [r.get("username") for r in (getattr(mr, "reviewers", None) or [])],
         "state": mr.state,
         "web_url": mr.web_url,
+    }
+
+
+def get_issue_details(project_id: int, issue_iid: int) -> dict:
+    """Issue author + assignees (for the comment-follow trigger gate, #40)."""
+    gl = get_client()
+    issue = gl.projects.get(project_id).issues.get(issue_iid)
+    return {
+        "iid": issue.iid,
+        "author": issue.author.get("username") if isinstance(issue.author, dict) else "?",
+        "assignees": [a.get("username") for a in (issue.assignees or [])],
+        "state": issue.state,
     }
 
 

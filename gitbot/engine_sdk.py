@@ -1607,38 +1607,53 @@ async def diagnose_failure(sit: Situation, workflow: str, report: str) -> tuple[
 
 
 CLASSIFY_COMMENT_PROMPT = """\
-A user commented on a GitLab issue where a bot is participating. Decide how
+A user commented on a GitLab {target} where a bot is participating. Decide how
 the bot should treat the comment:
-
-- "answer": a question or side request that just needs a reply — information,
+{ignore_option}- "answer": a question or side request that just needs a reply — information,
   a report, an explanation, something not requiring changes to repositories,
-  projects or the issue's actual task.
+  projects or the task.
 - "steer": feedback or direction on work the bot already did or is doing for
-  THIS issue's task — corrections ("that's wrong, fix it"), adjustments
+  THIS task — corrections ("that's wrong, fix it"), adjustments
   ("use X instead of Y"), additions ("also cover Z"), or "continue/retry".
   The bot should pick the task back up, adopting its prior work.
-- "task": a NEW request to do work — implement/fix/configure something the
-  issue describes but the bot hasn't started, or a fresh ask requiring
+- "task": a NEW request to do work — implement/fix/configure something
+  described but the bot hasn't started, or a fresh ask requiring
   commits, pipelines or project changes.
 
-Issue title: {title}
+{target} title: {title}
 Comment by @{actor}:
 {comment}
 
 {complexity_scale}
 
-Respond with exactly: <answer|steer|task> <complexity>
+Respond with exactly: <{words}> <complexity>
 Example: answer 2"""
 
+_IGNORE_OPTION = (
+    '- "ignore": the comment is not directed at the bot and needs no action '
+    "from it — two people talking, an FYI, a status note, thanks. The bot was "
+    "not @mentioned; staying silent is correct unless it is genuinely being "
+    "asked or told to do something.\n")
 
-async def classify_comment(sit: Situation) -> str:
-    """Cheap triage for comment callouts: 'answer' (just reply, no labels, no
-    takeover), 'steer' (resume the issue's work incorporating the comment) or
-    'task' (treat like being freshly assigned the work)."""
+
+async def classify_comment(sit: Situation, allow_ignore: bool = False) -> str:
+    """Cheap triage for comments: 'answer' (reply only), 'steer' (resume work
+    incorporating the comment), 'task' (fresh work) — and, when allow_ignore
+    (a plain non-@mention comment the bot only sees via a followed role),
+    'ignore' (stay silent). Defaults to 'answer' on any parse trouble, except
+    when ignore is allowed, where the safe default is to stay silent."""
+    words = "answer|steer|task"
+    valid = {"answer", "steer", "task"}
+    if allow_ignore:
+        words = "ignore|" + words
+        valid = valid | {"ignore"}
     try:
         raw = await _classify_complete(
             system="You are a precise classifier. Answer in the exact format requested.",
             prompt=CLASSIFY_COMMENT_PROMPT.format(
+                target="merge request" if sit.target_type == "MergeRequest" else "issue",
+                ignore_option=_IGNORE_OPTION if allow_ignore else "",
+                words=words,
                 title=sit.target_title,
                 actor=sit.actor,
                 comment=(sit.comment_body or "")[:2000],
@@ -1646,12 +1661,12 @@ async def classify_comment(sit: Situation) -> str:
             ),
         )
         word, complexity = _parse_classification(
-            raw, {"answer", "steer", "task"}, "answer")
+            raw, valid, "ignore" if allow_ignore else "answer")
         sit.task_complexity = complexity
         return word
     except Exception as e:
-        log.warning("Comment classification failed (%s) — defaulting to answer", e)
-    return "answer"
+        log.warning("Comment classification failed (%s) — defaulting", e)
+    return "ignore" if allow_ignore else "answer"
 
 
 CLASSIFY_PROMPT = """\

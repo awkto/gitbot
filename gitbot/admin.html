@@ -162,6 +162,14 @@
   </div>
   <div id="groupList"></div>
 
+  <!-- Triggers & Behaviour -->
+  <h2>Triggers &amp; Behaviour <span style="font-size:0.75rem;color:#484f58">— how GitBot decides to engage</span></h2>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:0.75rem;margin-bottom:1rem;font-size:0.85rem">
+    <div style="color:#8b949e;font-size:0.75rem;margin-bottom:0.4rem">Follow plain (non-@mention) comments when GitBot is the… <span style="color:#484f58">(@mentions and answers to its own questions always engage)</span></div>
+    <div id="behaviourToggles" style="display:flex;flex-direction:column;gap:0.3rem"></div>
+    <span id="behaviourMsg" style="font-size:0.75rem;color:#3fb950;margin-left:0.2rem"></span>
+  </div>
+
   <!-- Stats -->
   <div class="grid" id="statsGrid"></div>
 
@@ -272,6 +280,8 @@ async function fetchStats() {
         ${modelSelect('mention')}${modelSelect('implement')}${modelSelect('orchestrate')}${modelSelect('review')}
         <span id="wfModelMsg" style="font-size:0.7rem;color:#3fb950"></span>
       </div>`;
+
+    renderBehaviour(d.behaviour || {}, src);
 
     document.getElementById('statsGrid').innerHTML = `
       <div class="card"><div class="label">Uptime</div><div class="value">${dur(d.uptime_seconds)}</div></div>
@@ -621,6 +631,51 @@ async function obProvision() {
       </div>`;
     fetchStats();
   } catch(e) { msg.innerHTML = `<span class="badge error">${e}</span>`; }
+}
+
+// ---- Triggers & Behaviour (#40) ----
+const BEHAVIOUR_TOGGLES = [
+  {k:'act_on_issue_assignee_comments', label:'assignee on an issue'},
+  {k:'act_on_mr_assignee_comments',    label:'assignee on a merge request'},
+  {k:'act_on_mr_author_comments',      label:'author of a merge request'},
+  {k:'act_on_mr_reviewer_comments',    label:'reviewer on a merge request'},
+];
+function renderBehaviour(b, src) {
+  const el = document.getElementById('behaviourToggles');
+  if (document.activeElement && document.activeElement.closest &&
+      document.activeElement.closest('#behaviourToggles')) return;
+  const rows = BEHAVIOUR_TOGGLES.map(t => {
+    const on = !!b[t.k];
+    const envLocked = src[t.k] === 'env';
+    return `<label style="display:flex;align-items:center;gap:0.5rem;${envLocked?'opacity:0.55':''}">
+      <input type="checkbox" ${on?'checked':''} ${envLocked?'disabled':''}
+             onchange="setBehaviour('${t.k}', this.checked)">
+      ${t.label}${envLocked?' <span style="color:#9e6a03;font-size:0.65rem">(env)</span>':''}</label>`;
+  }).join('');
+  const esc = !!b.escalation_enabled, escLocked = src.escalation_enabled === 'env';
+  const audit = b.deep_audit_hours ?? 24, auditLocked = src.deep_audit_hours === 'env';
+  el.innerHTML = rows + `
+    <div style="border-top:1px solid #21262d;margin-top:0.4rem;padding-top:0.4rem;display:flex;flex-direction:column;gap:0.3rem">
+      <label style="display:flex;align-items:center;gap:0.5rem;${escLocked?'opacity:0.55':''}">
+        <input type="checkbox" ${esc?'checked':''} ${escLocked?'disabled':''}
+               onchange="setBehaviour('escalation_enabled', this.checked)">
+        Retry failed tasks one model tier up (escalation)${escLocked?' <span style="color:#9e6a03;font-size:0.65rem">(env)</span>':''}</label>
+      <label style="display:flex;align-items:center;gap:0.4rem;${auditLocked?'opacity:0.55':''}">
+        Nightly deep audit every
+        <input type="number" min="0" max="168" value="${audit}" ${auditLocked?'disabled':''}
+               onchange="setBehaviour('deep_audit_hours', parseInt(this.value)||0)"
+               style="width:3rem;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:0.1rem">
+        hours (0 = off)${auditLocked?' <span style="color:#9e6a03;font-size:0.65rem">(env)</span>':''}</label>
+    </div>`;
+}
+async function setBehaviour(key, value) {
+  const msg = document.getElementById('behaviourMsg');
+  try {
+    const r = await fetch(`${API}/behaviour`, {method:'POST', headers:JH,
+      body: JSON.stringify({[key]: value})});
+    msg.textContent = r.ok ? '✓ saved' : '✗ ' + ((await r.json()).error || 'failed');
+  } catch(e) { msg.textContent = '✗'; }
+  setTimeout(() => { msg.textContent = ''; }, 2000);
 }
 
 function refresh() { fetchStats(); fetchAll(); }

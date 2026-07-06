@@ -91,9 +91,13 @@ def test_untagged_comment_without_role_or_pending_skipped():
     assert _should_skip(sit)
 
 
-def test_untagged_comment_with_assignee_role_passes():
-    sit = _sit(actor="bob", discussion_id="d2", comment_body="hello world",
-               bot_is_assignee=True)
+def test_untagged_comment_with_assignee_role_passes(monkeypatch):
+    # The bot's role is now looked up live (#40) rather than read from the
+    # webhook payload — mock the lookup to report the bot as issue assignee.
+    from gitbot import brain
+    monkeypatch.setattr(brain.glc, "get_issue_details",
+                        lambda p, i: {"assignees": ["gitbot"], "author": "bob"})
+    sit = _sit(actor="bob", discussion_id="d2", comment_body="hello world")
     assert not _should_skip(sit)
 
 

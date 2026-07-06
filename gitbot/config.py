@@ -84,6 +84,21 @@ class Settings(BaseSettings):
     # scheduler can also POST /reconcile with the webhook secret.
     reconcile_minutes: int = 10
 
+    # Comment-follow triggers (#40): which role makes GitBot act on a PLAIN
+    # (non-@mention) comment on a target. @mentions and answers to the bot's
+    # own questions ALWAYS act, regardless of these. Live-tunable from the
+    # admin panel's Triggers & Behaviour section.
+    #   issue assignee — follow discussion on issues assigned to the bot
+    #   MR assignee    — follow discussion on MRs assigned to the bot
+    #   MR author      — follow discussion on MRs the bot opened
+    #   MR reviewer    — follow discussion on MRs the bot only reviews (off by
+    #                    default: a reviewer is asked once, not subscribed to
+    #                    every comment; @mention still reaches it)
+    act_on_issue_assignee_comments: bool = True
+    act_on_mr_assignee_comments: bool = True
+    act_on_mr_author_comments: bool = True
+    act_on_mr_reviewer_comments: bool = False
+
     # Nightly deep audit (#30): every this-many hours, scan recently-DONE
     # todos for callouts lost invisibly (GitLab auto-completes a mention todo
     # when the bot posts ANY comment — a concurrent session's placeholder

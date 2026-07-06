@@ -59,7 +59,7 @@ Only the *new assignment* triggers work; editing a bot-assigned issue does not.
 After the system-note drop, a comment **acts if any** of these holds:
 
 1. it **@mentions `@gitbot`**, or
-2. the bot **has a role on the target** — assignee / reviewer / author, or
+2. the bot holds a **role the operator has configured to follow** (below), or
 3. it **answers a pending question** the bot asked — no `@` needed: either a
    reply in the question's own thread (anyone may answer), or any comment from
    the user the question was addressed to.
@@ -68,28 +68,43 @@ Guard: if a question is pending but the comment neither answers it nor
 `@`-mentions the bot, it is dropped, so unrelated chatter can't consume the
 question.
 
+### Which roles follow plain comments (configurable)
+
+For a **plain (non-@mention)** comment, GitBot looks up its role on the target
+live and follows the discussion only for roles enabled in **Admin → Triggers &
+Behaviour** (env-overridable):
+
+| Role | Setting | Default |
+|---|---|---|
+| Issue assignee | `GITBOT_ACT_ON_ISSUE_ASSIGNEE_COMMENTS` | ✅ on |
+| MR assignee | `GITBOT_ACT_ON_MR_ASSIGNEE_COMMENTS` | ✅ on |
+| MR author (bot opened it) | `GITBOT_ACT_ON_MR_AUTHOR_COMMENTS` | ✅ on |
+| MR reviewer (only reviewing) | `GITBOT_ACT_ON_MR_REVIEWER_COMMENTS` | ❌ off |
+
+A reviewer is asked to review once, not subscribed to every comment — so
+reviewer-only MRs don't follow plain comments by default. An `@mention` still
+reaches the bot on any target regardless of these settings.
+
+### Silent observation
+
+When a plain comment reaches GitBot only via a followed role (not an
+`@mention`, not a pending answer), the Haiku triage may classify it **`ignore`**
+— two people talking, an FYI, a thank-you. GitBot then stays completely silent
+(no placeholder, no reply). It engages (`answer` / `steer` / `task`) only when
+the comment genuinely asks or tells it to do something. `@mentions` are never
+ignored.
+
 ### Worked examples
 
 | Situation | Acts? |
 |---|---|
 | `@gitbot fix the flaky test` (issue or MR) | ✅ acts |
 | Reply in the bot's question thread, or from the asked user (no `@`) | ✅ acts — resumes the parked task |
-| Plain comment on an MR where the bot is author / assignee / reviewer | ✅ acts — MR role is looked up live |
-| Plain comment (no `@`) on a bot-**assigned issue** | ❌ dropped — see asymmetry below |
-| Reply to a bot comment with no `@`, no pending question, no role | ❌ dropped |
-
-### Known asymmetry: issue comments vs MR comments
-
-Rule 2 ("bot has a role") fires for **MR** comments — the skip gate looks up
-the bot's author/assignee/reviewer role live. It does **not** fire for
-**issue** comments: the note handler never populates "bot is assignee" for
-issues, so only rule 1 (`@mention`) or rule 3 (pending answer) gets an issue
-comment through.
-
-Consequence: assign the bot an issue, then comment "also do X" *without*
-`@gitbot`, and it is ignored — though the same comment on an MR would be
-picked up. This is protective (the bot doesn't barge into every comment on
-issues it's assigned) but inconsistent with MR behavior. Tracked separately.
+| Plain relevant comment on a bot-**assigned issue** ("this approach is wrong") | ✅ acts (`answer`/`steer`/`task`) |
+| Plain chatter between two humans on a bot-assigned issue | ✅ seen, ✅ classified `ignore` → stays silent |
+| Plain comment on an MR the bot is **assignee/author** of | ✅ acts |
+| Plain comment on an MR the bot only **reviews** | ❌ dropped by default (`@mention` to reach it) |
+| Reply to a bot comment with no `@`, no pending question, no followed role | ❌ dropped |
 
 ## What runs when it acts
 

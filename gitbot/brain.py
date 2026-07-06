@@ -93,6 +93,25 @@ async def _decide_and_act(sit, wf_id: str, target_str: str) -> None:
     sit._wf_id = wf_id
     sit._work_id = work_id
 
+    from gitbot import engine_sdk
+
+    # For a plain comment the bot only sees via a followed role, decide whether
+    # to engage BEFORE announcing itself — an "ignore" verdict stays fully
+    # silent (no placeholder, no thread), so following a discussion feels
+    # natural instead of the bot replying to everything. @mentions and answers
+    # to the bot's own question always engage (never ignorable).
+    answers_pending = (sit.event_type == "Note Hook"
+                       and _answers_pending_question(sit))
+    comment_intent: str | None = None
+    if sit.event_type == "Note Hook" and not answers_pending:
+        comment_intent = await engine_sdk.classify_comment(
+            sit, allow_ignore=(sit.trigger != "mentioned"))
+        if comment_intent == "ignore":
+            tracker.log("info", f"Observed comment on {target_str} — no action needed", wf_id)
+            tracker.finish_workflow(wf_id, "completed")
+            state.complete_work_item(work_id)
+            return
+
     placeholder_id = _post_placeholder(sit)
 
     # Pure answer sessions (comment callouts) must not touch labels: clearing
@@ -102,14 +121,12 @@ async def _decide_and_act(sit, wf_id: str, target_str: str) -> None:
     owns_labels = sit.event_type != "Note Hook"
 
     try:
-        from gitbot import engine_sdk
-
         sdk_result: str | None = None
         sdk_ok = True
 
         if (sit.trigger in ("mentioned", "comment")
                 and sit.target_type == "Issue"
-                and _answers_pending_question(sit)):
+                and answers_pending):
             # Reply to a question the bot asked — continue the parked task
             # with the answer in context, not a conversational response.
             sit.is_replay = True
@@ -122,11 +139,12 @@ async def _decide_and_act(sit, wf_id: str, target_str: str) -> None:
                 kind, sit, wf_id, placeholder_id)
 
         elif sit.trigger in ("mentioned", "comment"):
-            # Comment intent triage: a plain answer must not churn labels
-            # or take over the issue; "steer" adjusts/continues the
-            # issue's existing work (resume-style, adopting prior state);
-            # "task" is a fresh work request handled like an assignment.
-            intent = await engine_sdk.classify_comment(sit)
+            # Comment intent triage (classified above, before the placeholder):
+            # a plain answer must not churn labels or take over the issue;
+            # "steer" adjusts/continues the target's existing work (resume-style,
+            # adopting prior state); "task" is a fresh work request handled like
+            # an assignment.
+            intent = comment_intent or "answer"
             tracker.add_phase(wf_id, "agent")
             if intent in ("task", "steer"):
                 if intent == "steer":
@@ -286,19 +304,13 @@ def _should_skip(sit: Situation) -> bool:
         has_pending = sit.pending_question is not None
         answers_pending = _answers_pending_question(sit)
 
-        has_role = sit.bot_is_assignee or sit.bot_is_reviewer or sit.bot_is_author
-        if not has_role and sit.target_type == "MergeRequest" and sit.target_iid:
-            try:
-                details = glc.get_mr_details(sit.project_id, sit.target_iid)
-                sit.bot_is_author = (details.get("author") == sit.bot_username)
-                sit.bot_is_assignee = (sit.bot_username in details.get("assignees", []))
-                has_role = sit.bot_is_assignee or sit.bot_is_author
-                sit.mr_source_branch = details.get("source_branch", sit.mr_source_branch)
-            except Exception:
-                pass
-
-        if not has_mention and not has_role and not answers_pending:
-            log.debug("Ignoring note — no relationship and no pending question")
+        # A plain (non-mention) comment acts only when the bot holds a role the
+        # operator has configured to follow (#40). An @mention or an answer to
+        # the bot's own question always acts, regardless of role/config.
+        follows = (has_mention or answers_pending
+                   or _comment_role_follows(sit))
+        if not follows:
+            log.debug("Ignoring note — no mention, no followed role, no pending answer")
             return True
         if has_pending and not answers_pending and not has_mention:
             log.debug("Ignoring note — pending question, but comment is neither "
@@ -310,6 +322,37 @@ def _should_skip(sit: Situation) -> bool:
             log.debug("Ignoring MR event on bot-authored MR !%s", sit.target_iid)
             return True
 
+    return False
+
+
+def _comment_role_follows(sit: Situation) -> bool:
+    """Does the bot hold a role on this comment's target that the operator has
+    configured to follow (#40)? Looks the role up live and records it on the
+    situation (downstream branches reuse bot_is_* / mr_source_branch)."""
+    if not sit.target_iid:
+        return False
+    if sit.target_type == "Issue":
+        try:
+            det = glc.get_issue_details(sit.project_id, sit.target_iid)
+        except Exception:
+            return False
+        sit.bot_is_assignee = sit.bot_username in det.get("assignees", [])
+        sit.bot_is_author = det.get("author") == sit.bot_username
+        return sit.bot_is_assignee and settings.act_on_issue_assignee_comments
+    if sit.target_type == "MergeRequest":
+        try:
+            det = glc.get_mr_details(sit.project_id, sit.target_iid)
+        except Exception:
+            return False
+        sit.bot_is_author = det.get("author") == sit.bot_username
+        sit.bot_is_assignee = sit.bot_username in det.get("assignees", [])
+        sit.bot_is_reviewer = sit.bot_username in det.get("reviewers", [])
+        sit.mr_source_branch = det.get("source_branch", sit.mr_source_branch)
+        return (
+            (sit.bot_is_author and settings.act_on_mr_author_comments)
+            or (sit.bot_is_assignee and settings.act_on_mr_assignee_comments)
+            or (sit.bot_is_reviewer and settings.act_on_mr_reviewer_comments)
+        )
     return False
 
 
