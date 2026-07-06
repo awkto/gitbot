@@ -32,8 +32,11 @@ CI_YAML_PATH = ".gitlab-ci.yml"
 CI_YAML = r"""# Managed by GitBot — runs Claude Code non-interactively for a target
 # issue/MR. Do not edit by hand; GitBot re-seeds this file on setup.
 # Required masked CI/CD variables (set by GitBot): ANTHROPIC_API_KEY,
-# GITBOT_PUSH_TOKEN. Add any tool tokens (bao/gh/doctl/...) as your own
-# masked variables — they are exposed to the job env for your image's CLIs.
+# GITBOT_PUSH_TOKEN. Model is passed per-run as CLAUDE_MODEL (a tier alias the
+# CLI resolves, or a pinned id). Add any tool tokens (bao/gh/doctl/...) as your
+# own masked variables — they are exposed to the job env for your image's CLIs.
+# The MR is opened via native GitLab push options, so the image only needs
+# git + claude (no extra release CLIs required in the image).
 claude:
   image: "$CLAUDE_IMAGE"
   rules:
@@ -43,6 +46,7 @@ claude:
   script:
     - set -eu
     - export ANTHROPIC_API_KEY GITLAB_TOKEN="$GITBOT_PUSH_TOKEN"
+    - CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"
     - git config --global user.email "${GITBOT_USER:-gitbot}@${CI_SERVER_HOST}"
     - git config --global user.name "GitBot"
     - git clone --depth 30 "https://oauth2:${GITBOT_PUSH_TOKEN}@${CI_SERVER_HOST}/${TARGET_PROJECT}.git" work
@@ -52,9 +56,9 @@ claude:
     - git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
     - |
       if [ -n "${ALLOWED_TOOLS:-}" ]; then
-        claude -p "$PROMPT" --permission-mode acceptEdits --allowedTools "$ALLOWED_TOOLS" --output-format stream-json | tee ../claude.log
+        claude -p "$PROMPT" --model "$CLAUDE_MODEL" --permission-mode acceptEdits --allowedTools "$ALLOWED_TOOLS" | tee ../claude.log
       else
-        claude -p "$PROMPT" --permission-mode acceptEdits --output-format stream-json | tee ../claude.log
+        claude -p "$PROMPT" --model "$CLAUDE_MODEL" --permission-mode acceptEdits | tee ../claude.log
       fi
     - |
       if [ -z "$(git status --porcelain)" ]; then
@@ -62,12 +66,12 @@ claude:
       fi
       git add -A
       git commit -m "GitBot: ${PROMPT}"
-      git push -u origin "$BRANCH"
-      export GITLAB_HOST="$CI_SERVER_HOST" GITLAB_TOKEN="$GITBOT_PUSH_TOKEN"
-      glab mr create -R "$TARGET_PROJECT" --source-branch "$BRANCH" \
-        --target-branch "$DEFAULT_BRANCH" --title "GitBot: ${PROMPT}" \
-        --description "Automated by GitBot pipeline ${CI_PIPELINE_URL}" --yes || \
-        echo "Branch pushed; open the MR manually if glab failed."
+      git push -u origin "$BRANCH" \
+        -o merge_request.create \
+        -o merge_request.target="$DEFAULT_BRANCH" \
+        -o merge_request.title="GitBot: ${PROMPT}" \
+        -o merge_request.description="Automated by GitBot pipeline ${CI_PIPELINE_URL}" \
+        || git push -u origin "$BRANCH"
 """
 
 
@@ -131,9 +135,10 @@ def setup(project_spec: str, image: str, create_if_missing: bool) -> dict:
 
 
 def dispatch(target_project: str, target_type: str, target_iid: int,
-             prompt: str, allowed_tools: str = "") -> dict:
+             prompt: str, allowed_tools: str = "", model: str = "") -> dict:
     """Trigger a Claude Code pipeline for a target issue/MR. Returns the
-    pipeline id/status/url so GitBot can link + track it."""
+    pipeline id/status/url so GitBot can link + track it. `model` overrides
+    the configured claude_ci_model (passed to the CLI as CLAUDE_MODEL)."""
     if not settings.claude_ci_enabled or not settings.claude_ci_project:
         raise ValueError("Claude CI is not enabled/configured.")
     project = glc.get_project(settings.claude_ci_project)
@@ -145,6 +150,7 @@ def dispatch(target_project: str, target_type: str, target_iid: int,
         "TARGET_TYPE": target_type,
         "TARGET_IID": str(target_iid),
         "CLAUDE_IMAGE": settings.claude_ci_image,
+        "CLAUDE_MODEL": model or settings.claude_ci_model,
         "GITBOT_USER": settings.bot_username,
     }
     if allowed_tools:

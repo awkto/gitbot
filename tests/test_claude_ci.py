@@ -13,7 +13,9 @@ def test_ci_yaml_is_gated_and_uses_variables():
     assert "$CLAUDE_IMAGE" in y           # image comes from the trigger
     assert all(v in y for v in ("TARGET_PROJECT", "TARGET_TYPE", "TARGET_IID"))
     assert "claude -p" in y               # runs Claude Code headless
-    assert "glab mr create" in y          # opens the MR back
+    assert '--model "$CLAUDE_MODEL"' in y  # model chosen by GitBot, passed as a var
+    assert "merge_request.create" in y    # opens the MR via native push options
+    assert "glab" not in y                 # no dependency on glab in the image
     assert "$GITBOT_PUSH_TOKEN" in y      # push auth from a masked var
 
 
@@ -79,6 +81,7 @@ def test_dispatch_passes_target_context_as_variables(stub_glc, monkeypatch):
     monkeypatch.setattr(settings, "claude_ci_project", "auto/runner", raising=False)
     monkeypatch.setattr(settings, "claude_ci_image", "awkto/claude-code:latest", raising=False)
     monkeypatch.setattr(settings, "claude_ci_ref", "main", raising=False)
+    monkeypatch.setattr(settings, "claude_ci_model", "sonnet", raising=False)
     pipe = claude_ci.dispatch("group/app", "issue", 12, "fix the bug", "Read,Edit,Bash")
     assert pipe["id"] == 42
     ref, variables = stub_glc["pipelines"][0]
@@ -88,6 +91,16 @@ def test_dispatch_passes_target_context_as_variables(stub_glc, monkeypatch):
     assert variables["PROMPT"] == "fix the bug"
     assert variables["ALLOWED_TOOLS"] == "Read,Edit,Bash"
     assert variables["CLAUDE_IMAGE"] == "awkto/claude-code:latest"
+    assert variables["CLAUDE_MODEL"] == "sonnet"       # default tier
+
+
+def test_dispatch_model_override(stub_glc, monkeypatch):
+    monkeypatch.setattr(settings, "claude_ci_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "claude_ci_project", "auto/runner", raising=False)
+    monkeypatch.setattr(settings, "claude_ci_model", "sonnet", raising=False)
+    claude_ci.dispatch("group/app", "issue", 1, "x", model="opus")
+    _, variables = stub_glc["pipelines"][0]
+    assert variables["CLAUDE_MODEL"] == "opus"          # per-dispatch override wins
 
 
 def test_dispatch_refuses_when_disabled(stub_glc, monkeypatch):

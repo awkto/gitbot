@@ -202,6 +202,7 @@ async def admin_stats():
             "project": settings.claude_ci_project,
             "image": settings.claude_ci_image,
             "ref": settings.claude_ci_ref,
+            "model": settings.claude_ci_model,
         },
     }
     from gitbot import config as cfg
@@ -810,7 +811,8 @@ async def admin_claude_ci_dispatch(request: Request):
         pipe = await asyncio.to_thread(
             claude_ci.dispatch, target_project,
             data.get("target_type", "issue"), int(data.get("target_iid", 0)),
-            prompt, (data.get("allowed_tools") or "").strip())
+            prompt, (data.get("allowed_tools") or "").strip(),
+            (data.get("model") or "").strip())
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
     return {"status": "ok", **pipe}

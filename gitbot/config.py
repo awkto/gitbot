@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     claude_ci_project: str = ""          # runner project id or path/with/namespace
     claude_ci_image: str = "awkto/claude-code:latest"
     claude_ci_ref: str = "main"          # ref the runner project's pipeline runs on
+    # Model for CI runs, passed as the CLAUDE_MODEL trigger variable. A tier
+    # alias (the image's CLI resolves haiku/sonnet/opus to the current model)
+    # or a pinned id. Defaults to the mid tier per the #42 rebalance.
+    claude_ci_model: str = "sonnet"
 
     # Debug/verbose: append the model that produced a result as a small footer
     # on GitBot's GitLab comments, so you can see which model any given output
