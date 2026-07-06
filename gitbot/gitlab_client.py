@@ -224,7 +224,8 @@ def get_project(id_or_path: str) -> dict | None:
     except Exception:
         return None
     return {"id": p.id, "path_with_namespace": p.path_with_namespace,
-            "default_branch": p.default_branch or "main", "web_url": p.web_url}
+            "default_branch": p.default_branch or "main", "web_url": p.web_url,
+            "registry_prefix": (getattr(p, "container_registry_image_prefix", "") or "")}
 
 
 def create_project(name: str, namespace_path: str | None = None) -> dict:
@@ -238,7 +239,8 @@ def create_project(name: str, namespace_path: str | None = None) -> dict:
         attrs["namespace_id"] = gl.groups.get(namespace_path).id
     p = gl.projects.create(attrs)
     return {"id": p.id, "path_with_namespace": p.path_with_namespace,
-            "default_branch": p.default_branch or "main", "web_url": p.web_url}
+            "default_branch": p.default_branch or "main", "web_url": p.web_url,
+            "registry_prefix": (getattr(p, "container_registry_image_prefix", "") or "")}
 
 
 def set_project_variable(project_id: int, key: str, value: str,

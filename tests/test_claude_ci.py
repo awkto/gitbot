@@ -8,7 +8,7 @@ from gitbot.config import settings
 
 def test_ci_yaml_is_gated_and_uses_variables():
     y = claude_ci.CI_YAML
-    assert "$PROMPT" in y                 # only runs when triggered with a prompt
+    assert "$PROMPT" in y                 # claude job only runs on a prompt
     assert 'if: \'$PROMPT\'' in y
     assert "$CLAUDE_IMAGE" in y           # image comes from the trigger
     assert all(v in y for v in ("TARGET_PROJECT", "TARGET_TYPE", "TARGET_IID"))
@@ -17,6 +17,21 @@ def test_ci_yaml_is_gated_and_uses_variables():
     assert "merge_request.create" in y    # opens the MR via native push options
     assert "glab" not in y                 # no dependency on glab in the image
     assert "$GITBOT_PUSH_TOKEN" in y      # push auth from a masked var
+
+
+def test_ci_yaml_has_kaniko_build_job():
+    y = claude_ci.CI_YAML
+    assert "build-image:" in y                     # the build stage
+    assert "kaniko-project/executor" in y          # rootless build, no privileged
+    assert "$CI_REGISTRY_IMAGE:latest" in y        # publishes to project registry
+    assert "if: '$BUILD_IMAGE'" in y               # gated on the build trigger var
+
+
+def test_dockerfile_extends_base_with_clis():
+    df = claude_ci._DOCKERFILE_TMPL.replace("{base}", "awkto/claude-code:latest")
+    assert df.startswith("# Managed by GitBot") and "FROM awkto/claude-code:latest" in df
+    for cli in ("gh", "glab", "doctl", "bao", "cloudflared", "wrangler"):
+        assert cli in df
 
 
 def test_ci_yaml_never_hardcodes_secrets():
@@ -35,11 +50,13 @@ def stub_glc(monkeypatch):
 
     def get_project(spec):
         return {"id": 7, "path_with_namespace": "auto/runner",
-                "default_branch": "main", "web_url": "http://gl/auto/runner"}
+                "default_branch": "main", "web_url": "http://gl/auto/runner",
+                "registry_prefix": "reg.example/auto/runner"}
     monkeypatch.setattr(claude_ci.glc, "get_project", get_project)
     monkeypatch.setattr(claude_ci.glc, "create_project",
                         lambda name, **k: {"id": 7, "path_with_namespace": f"me/{name}",
-                                           "default_branch": "main", "web_url": "http://gl/me"})
+                                           "default_branch": "main", "web_url": "http://gl/me",
+                                           "registry_prefix": f"reg.example/me/{name}"})
     monkeypatch.setattr(claude_ci.glc, "set_project_variable",
                         lambda pid, k, v, **kw: calls["vars"].append((k, v)))
     monkeypatch.setattr(claude_ci.glc, "get_file_content",
@@ -54,20 +71,38 @@ def stub_glc(monkeypatch):
     return calls
 
 
-def test_setup_sets_secrets_seeds_pipeline_verifies_runners(stub_glc):
+def test_setup_seeds_files_sets_secrets_and_triggers_build(stub_glc):
     res = claude_ci.setup("auto/runner", "awkto/claude-code:latest", create_if_missing=False)
     keys = [k for k, _ in stub_glc["vars"]]
     assert "ANTHROPIC_API_KEY" in keys and "GITBOT_PUSH_TOKEN" in keys
-    assert stub_glc["commits"], "pipeline file should be seeded"
-    assert stub_glc["commits"][0][0]["file_path"] == claude_ci.CI_YAML_PATH
+    seeded = {a[0]["file_path"] for a in stub_glc["commits"]}
+    assert seeded == {claude_ci.DOCKERFILE_PATH, claude_ci.CI_YAML_PATH}
+    # claude job runs on the project-registry image, not the base
+    assert res["registry_image"] == "reg.example/auto/runner:latest"
     assert res["runner_count"] == 1 and res["warnings"] == []
+    # first image build kicked off
+    assert stub_glc["pipelines"] and stub_glc["pipelines"][0][1] == {"BUILD_IMAGE": "true"}
+    assert res["build"]["id"] == 42
 
 
-def test_setup_warns_when_no_runners(stub_glc, monkeypatch):
+def test_setup_falls_back_to_base_image_without_registry(stub_glc, monkeypatch):
+    monkeypatch.setattr(claude_ci.glc, "get_project",
+                        lambda spec: {"id": 7, "path_with_namespace": "auto/runner",
+                                      "default_branch": "main", "web_url": "http://gl",
+                                      "registry_prefix": ""})   # no instance registry
+    res = claude_ci.setup("auto/runner", "awkto/claude-code:latest", create_if_missing=False)
+    assert res["has_registry"] is False
+    assert res["registry_image"] == "awkto/claude-code:latest"   # base image directly
+    assert res["build"] is None                                   # no build without a registry
+    assert any("registry" in w.lower() for w in res["warnings"])
+
+
+def test_setup_warns_and_skips_build_when_no_runners(stub_glc, monkeypatch):
     monkeypatch.setattr(claude_ci.glc, "list_project_runners", lambda pid: [])
     res = claude_ci.setup("auto/runner", "img", create_if_missing=False)
     assert res["runner_count"] == 0
     assert any("runner" in w.lower() for w in res["warnings"])
+    assert res["build"] is None and not stub_glc["pipelines"]  # no build without runners
 
 
 def test_setup_requires_anthropic_key(stub_glc, monkeypatch):

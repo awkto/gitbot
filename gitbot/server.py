@@ -767,14 +767,16 @@ async def admin_claude_ci_setup(request: Request):
     _check_admin()
     data = await request.json()
     project_spec = (data.get("project") or "").strip()
-    image = (data.get("image") or settings.claude_ci_image).strip()
+    # "image" here is the BASE image the runner project's Dockerfile extends;
+    # the claude job runs on the resulting project-registry image.
+    base_image = (data.get("image") or "awkto/claude-code:latest").strip()
     create = bool(data.get("create"))
     if not project_spec:
         raise HTTPException(status_code=400, detail="project (id, path, or name) required")
 
     from gitbot import claude_ci
     try:
-        result = await asyncio.to_thread(claude_ci.setup, project_spec, image, create)
+        result = await asyncio.to_thread(claude_ci.setup, project_spec, base_image, create)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
 
@@ -782,10 +784,23 @@ async def admin_claude_ci_setup(request: Request):
     cfg.save_config({
         "claude_ci_enabled": True,
         "claude_ci_project": str(result["project"]["path_with_namespace"]),
-        "claude_ci_image": image,
+        "claude_ci_image": result["registry_image"],  # claude job runs on the built image
     })
     result["status"] = "ok"
     return result
+
+
+@app.post("/admin/api/claude-ci/build")
+async def admin_claude_ci_build(request: Request):
+    """Rebuild the extended image (base + CLIs from the runner project's
+    Dockerfile) into the project registry."""
+    _check_admin()
+    from gitbot import claude_ci
+    try:
+        pipe = await asyncio.to_thread(claude_ci.build_image)
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=400)
+    return {"status": "ok", **pipe}
 
 
 @app.post("/admin/api/claude-ci/disable")

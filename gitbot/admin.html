@@ -169,12 +169,13 @@
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem">
       <label style="font-size:0.7rem;color:#8b949e">Runner project (id, path/with/namespace, or a name to create)<br>
         <input id="ccProject" placeholder="automation/gitbot-claude-runner" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px;font-size:0.8rem"></label>
-      <label style="font-size:0.7rem;color:#8b949e">Container image (customer-owned; extend with your CLIs)<br>
+      <label style="font-size:0.7rem;color:#8b949e">Base image (the project's Dockerfile extends this with your CLIs)<br>
         <input id="ccImage" placeholder="awkto/claude-code:latest" style="width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:0.3rem;border-radius:4px;font-size:0.8rem"></label>
     </div>
     <div style="margin-top:0.5rem">
       <label style="font-size:0.75rem;color:#8b949e"><input id="ccCreate" type="checkbox"> Create the project if it doesn't exist</label>
       <button class="btn primary" style="margin-left:0.5rem" onclick="ccSetup()">Enable &amp; verify</button>
+      <button class="btn" onclick="ccBuild()" title="Rebuild the extended image (base + your CLIs) into the project registry">Build image</button>
       <button class="btn" onclick="ccDisable()">Disable</button>
       <span id="ccMsg" style="margin-left:0.5rem;font-size:0.8rem"></span>
     </div>
@@ -732,12 +733,24 @@ async function ccSetup() {
   try {
     const d = await (await fetch(`${API}/claude-ci/setup`, {method:'POST', headers:JH, body:JSON.stringify(body)})).json();
     if (d.status !== 'ok') { msg.innerHTML = `<span class="badge error">${d.error}</span>`; return; }
-    msg.innerHTML = `<span class="badge ok">ready</span> <a href="${d.project.web_url}" target="_blank" style="color:#58a6ff">${d.project.path_with_namespace}</a>`;
+    const build = d.build ? ` · <a href="${d.build.web_url}" target="_blank" style="color:#58a6ff">building image #${d.build.id}</a>` : '';
+    msg.innerHTML = `<span class="badge ok">ready</span> <a href="${d.project.web_url}" target="_blank" style="color:#58a6ff">${d.project.path_with_namespace}</a>`
+      + ` <span style="color:#8b949e">→ image <code>${d.registry_image}</code></span>${build}`;
     const rc = d.runner_count;
     document.getElementById('ccRunners').innerHTML =
       (rc ? `<span class="badge ok">${rc} runner(s)</span>` : '<span class="badge error">no runners</span>')
       + (d.warnings||[]).map(w => ` <span style="color:#e3b341">⚠ ${w}</span>`).join('');
     fetchStats();
+  } catch(e) { msg.innerHTML = `<span class="badge error">${e}</span>`; }
+}
+async function ccBuild() {
+  const msg = document.getElementById('ccMsg');
+  msg.innerHTML = '<span style="color:#8b949e">Triggering image build…</span>';
+  try {
+    const d = await (await fetch(`${API}/claude-ci/build`, {method:'POST', headers:JH, body:'{}'})).json();
+    msg.innerHTML = d.status === 'ok'
+      ? `<span class="badge ok">build #${d.id} (${d.status})</span> <a href="${d.web_url}" target="_blank" style="color:#58a6ff">view</a>`
+      : `<span class="badge error">${d.error}</span>`;
   } catch(e) { msg.innerHTML = `<span class="badge error">${e}</span>`; }
 }
 async function ccDisable() {
