@@ -47,7 +47,7 @@ USER root
 ARG ARCH=amd64
 ARG GLAB_VERSION=1.68.0
 ARG DOCTL_VERSION=1.124.0
-ARG BAO_VERSION=2.2.1
+ARG BAO_VERSION=2.5.5
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends curl ca-certificates gnupg unzip; \
@@ -59,9 +59,8 @@ RUN set -eux; \
     curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${ARCH}.tar.gz" | tar -xz -C /usr/local bin/glab; \
     # doctl (DigitalOcean)
     curl -fsSL "https://github.com/digitalocean/doctl/releases/download/v${DOCTL_VERSION}/doctl-${DOCTL_VERSION}-linux-${ARCH}.tar.gz" | tar -xz -C /usr/local/bin doctl; \
-    # bao (OpenBao)
-    curl -fsSL -o /tmp/bao.zip "https://github.com/openbao/openbao/releases/download/v${BAO_VERSION}/bao_${BAO_VERSION}_linux_${ARCH}.zip"; \
-    unzip -o /tmp/bao.zip bao -d /usr/local/bin; \
+    # bao (OpenBao) — note the asset naming: Linux_x86_64.tar.gz
+    curl -fsSL "https://github.com/openbao/openbao/releases/download/v${BAO_VERSION}/bao_${BAO_VERSION}_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin bao; \
     # cloudflared + wrangler (Cloudflare)
     curl -fsSL -o /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"; \
     chmod +x /usr/local/bin/cloudflared; \
