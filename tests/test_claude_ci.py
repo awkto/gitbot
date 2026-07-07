@@ -30,8 +30,13 @@ def test_ci_yaml_has_kaniko_build_job():
 def test_dockerfile_extends_base_with_clis():
     df = claude_ci._DOCKERFILE_TMPL.replace("{base}", "awkto/claude-code:latest")
     assert df.startswith("# Managed by GitBot") and "FROM awkto/claude-code:latest" in df
-    for cli in ("gh", "glab", "doctl", "bao", "cloudflared", "wrangler"):
-        assert cli in df
+    # the full ops/dev toolbox the user asked for
+    for tool in ("gh", "glab", "doctl", "bao", "cloudflared", "wrangler",
+                 "terraform", "ansible", "openssh-client", "gnupg", "wget",
+                 "go", "python3", "tmux", "android", "dnsutils", "nginx", "awkto-cli"):
+        assert tool in df, tool
+    # awkto-cli is gated on an optional build-arg so the image builds without it
+    assert 'ARG GH_TOKEN' in df and 'if [ -n "$GH_TOKEN" ]' in df
 
 
 def test_ci_yaml_never_hardcodes_secrets():

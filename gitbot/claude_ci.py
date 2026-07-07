@@ -38,9 +38,10 @@ DOCKERFILE_PATH = "Dockerfile"
 # Claude Code base with common infra CLIs; the customer edits this freely.
 # {base} is the base image GitBot templates in at seed time.
 _DOCKERFILE_TMPL = r"""# Managed by GitBot — STARTING SCAFFOLD, edit freely, then re-run the
-# build-image pipeline. Extends the Claude Code base with the CLIs your CI
-# tasks use; the build-image job publishes it to THIS project's container
-# registry, which the claude job then runs on.
+# build-image pipeline. Extends the Claude Code base with an ops/dev toolbox;
+# the build-image job publishes it to THIS project's container registry, which
+# the claude job then runs on. This is a fat image (Go + JDK + Android SDK +
+# Terraform/Ansible/...) — trim anything you don't need to slim it down.
 FROM {base}
 
 USER root
@@ -48,24 +49,72 @@ ARG ARCH=amd64
 ARG GLAB_VERSION=1.68.0
 ARG DOCTL_VERSION=1.124.0
 ARG BAO_VERSION=2.5.5
+ARG TERRAFORM_VERSION=1.15.7
+ARG GO_VERSION=1.26.4
+ARG ANDROID_CMDLINE_VERSION=13114758
+# Optional: set this build-arg (from a GH_TOKEN CI/CD variable) to also build
+# the PRIVATE awkto-cli. Left empty, that step is skipped. NOTE: a build-arg is
+# visible in image history — use a fine-grained, read-only token.
+ARG GH_TOKEN=""
+
+# apt packages: shell/net/dns/dev basics + python, ansible, jdk (for android),
+# nginx, tmux, openssh, gnupg (pgp), bind/dig tools.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg unzip; \
-    # GitHub CLI (gh)
+    apt-get install -y --no-install-recommends \
+      curl wget gnupg ca-certificates unzip xz-utils git jq \
+      openssh-client tmux nginx dnsutils bind9-dnsutils bind9-utils \
+      python3 python3-pip python3-venv \
+      ansible \
+      default-jdk-headless \
+      build-essential; \
+    rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (gh)
+RUN set -eux; \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli.gpg; \
     echo "deb [signed-by=/usr/share/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list; \
-    apt-get update; apt-get install -y gh; \
-    # glab (GitLab CLI)
+    apt-get update; apt-get install -y --no-install-recommends gh; rm -rf /var/lib/apt/lists/*
+
+# Static-binary CLIs: glab, doctl, bao, terraform, cloudflared
+RUN set -eux; \
     curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${ARCH}.tar.gz" | tar -xz -C /usr/local bin/glab; \
-    # doctl (DigitalOcean)
     curl -fsSL "https://github.com/digitalocean/doctl/releases/download/v${DOCTL_VERSION}/doctl-${DOCTL_VERSION}-linux-${ARCH}.tar.gz" | tar -xz -C /usr/local/bin doctl; \
-    # bao (OpenBao) — note the asset naming: Linux_x86_64.tar.gz
     curl -fsSL "https://github.com/openbao/openbao/releases/download/v${BAO_VERSION}/bao_${BAO_VERSION}_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin bao; \
-    # cloudflared + wrangler (Cloudflare)
-    curl -fsSL -o /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"; \
-    chmod +x /usr/local/bin/cloudflared; \
-    npm install -g wrangler; \
-    apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/*
+    curl -fsSL -o /tmp/tf.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip"; unzip -o /tmp/tf.zip -d /usr/local/bin terraform; rm /tmp/tf.zip; \
+    curl -fsSL -o /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"; chmod +x /usr/local/bin/cloudflared
+
+# Go toolchain + wrangler (node/npm are already in the base)
+RUN set -eux; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -xz -C /usr/local; \
+    ln -sf /usr/local/go/bin/go /usr/local/bin/go; ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
+    npm install -g wrangler
+
+# Android SDK command-line tools + platform-tools (adb, sdkmanager)
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_SDK_ROOT=/opt/android-sdk
+RUN set -eux; \
+    mkdir -p ${ANDROID_HOME}/cmdline-tools; \
+    curl -fsSL -o /tmp/acmd.zip "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_VERSION}_latest.zip"; \
+    unzip -q /tmp/acmd.zip -d ${ANDROID_HOME}/cmdline-tools; \
+    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest; \
+    rm /tmp/acmd.zip; \
+    yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true; \
+    ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager "platform-tools" >/dev/null 2>&1 || true; \
+    chown -R node:node ${ANDROID_HOME} 2>/dev/null || true
+
+# awkto-cli (PRIVATE Go repo) — built only when GH_TOKEN is provided.
+RUN set -eux; \
+    if [ -n "$GH_TOKEN" ]; then \
+      git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/awkto/awkto-cli.git" /tmp/awkto-cli; \
+      cd /tmp/awkto-cli && /usr/local/go/bin/go build -o /usr/local/bin/awkto . && chmod +x /usr/local/bin/awkto; \
+      rm -rf /tmp/awkto-cli; \
+    else echo "GH_TOKEN not set — skipping private awkto-cli build"; fi
+
+ENV GOPATH="/home/node/go"
+ENV PATH="/usr/local/go/bin:/home/node/go/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:${PATH}"
+# Also expose the toolbox PATH to login shells (ENV only covers non-login).
+RUN printf 'export ANDROID_HOME=/opt/android-sdk\nexport ANDROID_SDK_ROOT=/opt/android-sdk\nexport GOPATH=/home/node/go\nexport PATH=/usr/local/go/bin:/home/node/go/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:$PATH\n' > /etc/profile.d/toolbox.sh
 # Match your base image's runtime user (the Claude Code base runs as `node`).
 USER node
 """
@@ -97,7 +146,7 @@ build-image:
     - mkdir -p /kaniko/.docker
     - AUTH=$(printf "%s:%s" "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64 | tr -d '\n')
     - printf '{"auths":{"%s":{"auth":"%s"}}}' "$CI_REGISTRY" "$AUTH" > /kaniko/.docker/config.json
-    - /kaniko/executor --context "$CI_PROJECT_DIR" --dockerfile "$CI_PROJECT_DIR/Dockerfile" --destination "$CI_REGISTRY_IMAGE:latest"
+    - /kaniko/executor --context "$CI_PROJECT_DIR" --dockerfile "$CI_PROJECT_DIR/Dockerfile" --destination "$CI_REGISTRY_IMAGE:latest" --build-arg "GH_TOKEN=${GH_TOKEN:-}"
 
 # Run Claude Code non-interactively against the target repo (carried in trigger
 # variables) and open an MR back.
